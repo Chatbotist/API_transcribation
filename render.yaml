@@ -4,16 +4,16 @@ services:
     env: python
     region: frankfurt
     buildCommand: |
-      wget https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip -O model.zip
+      wget https://alphacephei.com/vosk/models/vosk-model-ru-0.42.zip -O model.zip
       unzip model.zip
       
       # Автодетект структуры
-      if [ -f "vosk-model-small-ru-0.22/am/final.mdl" ]; then
+      if [ -f "vosk-model-ru-0.42/am/final.mdl" ]; then
           echo "Обнаружена новая структура архива"
-      elif [ -f "vosk-model-small-ru-0.22/vosk-model-small-ru-0.22/am/final.mdl" ]; then
+      elif [ -f "vosk-model-ru-0.42/vosk-model-ru-0.42/am/final.mdl" ]; then
           echo "Обнаружена старая структура - исправляем"
-          mv vosk-model-small-ru-0.22/vosk-model-small-ru-0.22/* vosk-model-small-ru-0.22/
-          rm -rf vosk-model-small-ru-0.22/vosk-model-small-ru-0.22
+          mv vosk-model-ru-0.42/vosk-model-ru-0.42/* vosk-model-ru-0.42/
+          rm -rf vosk-model-ru-0.42/vosk-model-ru-0.42
       else
           echo "ОШИБКА: Неверная структура архива!"
           exit 1
@@ -26,3 +26,5 @@ services:
     envVars:
       - key: PYTHONUNBUFFERED
         value: "1"
+      - key: TEMP_DIR
+        value: "/tmp/audio_temp"
