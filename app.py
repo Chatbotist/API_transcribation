@@ -18,7 +18,7 @@ AUDIO_TEMP_IN = "temp_audio.mp3"
 AUDIO_TEMP_OUT = "temp_audio.wav"
 
 def download_model():
-    """Скачивает и распаковывает модель Vosk с исправлением структуры"""
+    """Скачивает и распаковывает модель Vosk с автоматическим определением структуры"""
     try:
         if not os.path.exists(MODEL_NAME):
             logger.info(f"Скачивание модели {MODEL_NAME}...")
@@ -26,15 +26,24 @@ def download_model():
             # Скачивание
             os.system(f"wget {MODEL_URL} -O model.zip")
             
-            # Распаковка и исправление структуры
+            # Распаковка
             os.system("unzip model.zip")
-            os.system(f"mv {MODEL_NAME}/{MODEL_NAME}/* {MODEL_NAME}/")
-            os.system(f"rm -rf {MODEL_NAME}/{MODEL_NAME}")
+            
+            # Автоматическое определение структуры
+            if os.path.exists(f"{MODEL_NAME}/am/final.mdl"):
+                logger.info("Обнаружена новая структура архива")
+            elif os.path.exists(f"{MODEL_NAME}/{MODEL_NAME}/am/final.mdl"):
+                logger.info("Обнаружена старая структура архива - исправляем")
+                os.system(f"mv {MODEL_NAME}/{MODEL_NAME}/* {MODEL_NAME}/")
+                os.system(f"rm -rf {MODEL_NAME}/{MODEL_NAME}")
+            else:
+                raise Exception("Не удалось определить структуру архива!")
+
             os.system("rm model.zip")
             
-            # Проверка наличия ключевых файлов
+            # Финальная проверка
             if not os.path.exists(f"{MODEL_NAME}/am/final.mdl"):
-                raise Exception("Модель не распаковалась корректно!")
+                raise Exception("Критические файлы модели отсутствуют!")
             
             logger.info("Модель успешно загружена и проверена")
         return True
@@ -44,7 +53,7 @@ def download_model():
 
 # Инициализация модели
 if not download_model():
-    raise RuntimeError("Не удалось загрузить модель Vosk!")
+    raise RuntimeError("Не удалось инициализировать модель Vosk!")
 
 model = Model(MODEL_NAME)
 
@@ -63,10 +72,10 @@ def convert_to_wav(audio_url):
             "-i", AUDIO_TEMP_IN,
             "-ar", "16000",
             "-ac", "1",
-            "-y",  # Перезаписать если существует
+            "-y",
             AUDIO_TEMP_OUT
         ]
-        subprocess.run(ffmpeg_cmd, check=True, capture_output=True)
+        subprocess.run(ffmpeg_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         
         return AUDIO_TEMP_OUT
 
@@ -82,9 +91,9 @@ def transcribe():
         audio_url = data.get("audio_url")
         
         if not audio_url:
-            return jsonify({"error": "Не указан audio_url"}), 400
+            return jsonify({"error": "Параметр 'audio_url' обязателен"}), 400
 
-        logger.info(f"Обработка аудио: {audio_url}")
+        logger.info(f"Начата обработка: {audio_url}")
 
         # Конвертация аудио
         wav_file = convert_to_wav(audio_url)
@@ -100,7 +109,7 @@ def transcribe():
 
         result = recognizer.FinalResult()
 
-        # Очистка временных файлов
+        # Очистка
         for file in [AUDIO_TEMP_IN, AUDIO_TEMP_OUT]:
             if os.path.exists(file):
                 os.remove(file)
@@ -108,15 +117,15 @@ def transcribe():
         return jsonify({"text": result})
 
     except requests.exceptions.RequestException as e:
-        logger.error(f"Ошибка загрузки аудио: {str(e)}")
-        return jsonify({"error": "Не удалось загрузить аудио"}), 400
+        logger.error(f"Ошибка загрузки: {str(e)}")
+        return jsonify({"error": "Ошибка загрузки аудио"}), 400
         
     except subprocess.CalledProcessError as e:
         logger.error(f"Ошибка FFmpeg: {e.stderr.decode()}")
-        return jsonify({"error": "Ошибка обработки аудио"}), 500
+        return jsonify({"error": "Ошибка конвертации аудио"}), 500
         
     except Exception as e:
-        logger.error(f"Неизвестная ошибка: {str(e)}")
+        logger.error(f"Критическая ошибка: {str(e)}")
         return jsonify({"error": "Внутренняя ошибка сервера"}), 500
 
 if __name__ == "__main__":
