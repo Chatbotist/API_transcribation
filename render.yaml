@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: audio-transcriber
+    env: python
+    region: frankfurt  # Ближайший к России регион
+    buildCommand: |
+      wget https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip
+      unzip vosk-model-small-ru-0.22.zip
+      rm vosk-model-small-ru-0.22.zip
+      pip install -r requirements.txt
+    startCommand: python app.py
+    plan: free
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
