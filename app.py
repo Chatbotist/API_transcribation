@@ -4,6 +4,7 @@ import subprocess
 import os
 import requests
 import logging
+import json
 
 app = Flask(__name__)
 
@@ -18,7 +19,7 @@ AUDIO_TEMP_IN = "temp_audio.mp3"
 AUDIO_TEMP_OUT = "temp_audio.wav"
 
 def download_model():
-    """Скачивает и распаковывает модель Vosk с автоматическим определением структуры"""
+    """Скачивает и распаковывает модель Vosk"""
     try:
         if not os.path.exists(MODEL_NAME):
             logger.info(f"Скачивание модели {MODEL_NAME}...")
@@ -33,7 +34,7 @@ def download_model():
             if os.path.exists(f"{MODEL_NAME}/am/final.mdl"):
                 logger.info("Обнаружена новая структура архива")
             elif os.path.exists(f"{MODEL_NAME}/{MODEL_NAME}/am/final.mdl"):
-                logger.info("Обнаружена старая структура архива - исправляем")
+                logger.info("Обнаружена старая структура - исправляем")
                 os.system(f"mv {MODEL_NAME}/{MODEL_NAME}/* {MODEL_NAME}/")
                 os.system(f"rm -rf {MODEL_NAME}/{MODEL_NAME}")
             else:
@@ -107,14 +108,16 @@ def transcribe():
                     break
                 recognizer.AcceptWaveform(data)
 
-        result = recognizer.FinalResult()
+        # Получаем и парсим результат
+        result = json.loads(recognizer.FinalResult())
+        transcription_text = result.get("text", "")
 
         # Очистка
         for file in [AUDIO_TEMP_IN, AUDIO_TEMP_OUT]:
             if os.path.exists(file):
                 os.remove(file)
 
-        return jsonify({"text": result})
+        return jsonify({"text": transcription_text})
 
     except requests.exceptions.RequestException as e:
         logger.error(f"Ошибка загрузки: {str(e)}")
