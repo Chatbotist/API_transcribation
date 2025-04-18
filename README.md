@@ -1,18 +1,15 @@
-# Vosk Audio Transcriber API
+# Улучшенный Audio Transcriber API
 
-## Требования
-- Python 3.10+
-- FFmpeg (уже установлен на Render.com)
+## Особенности:
+- Использует улучшенную модель **vosk-model-ru-0.42**
+- Автоматическое шумоподавление (RNNoise)
+- Ограничение времени обработки (60 сек)
+- Поддержка длинных аудио (до 5 минут)
+- Поточная обработка для быстрого ответа
 
-## Локальный запуск
-```bash
-pip install -r requirements.txt
-wget https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip -O model.zip
-unzip model.zip
-
-# Если архив с вложенной структурой:
-mv vosk-model-small-ru-0.22/vosk-model-small-ru-0.22/* vosk-model-small-ru-0.22/
-rm -rf vosk-model-small-ru-0.22/vosk-model-small-ru-0.22
-
-rm model.zip
-python app.py
+## API Endpoint
+**POST /transcribe**
+```json
+{
+  "audio_url": "https://example.com/audio.mp3"
+}
