@@ -1,17 +1,16 @@
 services:
   - type: web
-    name: audio-transcriber
+    name: async-audio-transcriber
     env: python
     region: frankfurt
     buildCommand: |
       wget https://alphacephei.com/vosk/models/vosk-model-ru-0.42.zip -O model.zip
       unzip model.zip
       
-      # Автодетект структуры
       if [ -f "vosk-model-ru-0.42/am/final.mdl" ]; then
-          echo "Обнаружена новая структура архива"
+          echo "Новая структура архива"
       elif [ -f "vosk-model-ru-0.42/vosk-model-ru-0.42/am/final.mdl" ]; then
-          echo "Обнаружена старая структура - исправляем"
+          echo "Старая структура - исправляем"
           mv vosk-model-ru-0.42/vosk-model-ru-0.42/* vosk-model-ru-0.42/
           rm -rf vosk-model-ru-0.42/vosk-model-ru-0.42
       else
@@ -19,15 +18,14 @@ services:
           exit 1
       fi
       
-      # Скачиваем модель для шумоподавления
       wget https://alphacephei.com/vosk/models/vosk-model-ru-0.42-rnnoise.zip -O rnnoise.zip
       unzip rnnoise.zip -d vosk-model-ru-0.42
-      rm rnnoise.zip
-      
-      rm model.zip
+      rm rnnoise.zip model.zip
       pip install -r requirements.txt
     startCommand: python app.py
     plan: free
     envVars:
       - key: PYTHONUNBUFFERED
         value: "1"
+      - key: MAX_CONCURRENT_TASKS
+        value: "5"
