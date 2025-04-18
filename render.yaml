@@ -19,6 +19,11 @@ services:
           exit 1
       fi
       
+      # Скачиваем модель для шумоподавления
+      wget https://alphacephei.com/vosk/models/vosk-model-ru-0.42-rnnoise.zip -O rnnoise.zip
+      unzip rnnoise.zip -d vosk-model-ru-0.42
+      rm rnnoise.zip
+      
       rm model.zip
       pip install -r requirements.txt
     startCommand: python app.py
@@ -26,5 +31,3 @@ services:
     envVars:
       - key: PYTHONUNBUFFERED
         value: "1"
-      - key: TEMP_DIR
-        value: "/tmp/audio_temp"
