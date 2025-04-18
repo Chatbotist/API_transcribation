@@ -6,181 +6,150 @@ import requests
 import logging
 import json
 import tempfile
-from threading import Thread
 import time
+import threading
+from queue import Queue
+import uuid
 
 app = Flask(__name__)
-SetLogLevel(-1)  # Отключаем лишние логи Vosk
+SetLogLevel(-1)  # Отключаем логи Vosk
 
-# Настройка логов
+# Настройка
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("Vosk-Transcriber")
+logger = logging.getLogger("Async-Vosk-Transcriber")
 
 # Конфигурация
-MODEL_NAME = "vosk-model-ru-0.42"  # Более точная модель
+MODEL_NAME = "vosk-model-ru-0.42"
 MODEL_URL = f"https://alphacephei.com/vosk/models/{MODEL_NAME}.zip"
 CHUNK_SIZE = 4000
 SAMPLE_RATE = 16000
-MAX_AUDIO_DURATION = 300  # 5 минут (ограничение обработки)
+MAX_CONCURRENT_TASKS = 5  # Максимум одновременных обработок
+TASK_QUEUE = Queue()
 
-def download_model():
-    """Скачивает и распаковывает улучшенную модель Vosk"""
-    try:
-        if not os.path.exists(MODEL_NAME):
-            logger.info(f"Скачивание улучшенной модели {MODEL_NAME}...")
-            
-            # Скачивание
-            os.system(f"wget {MODEL_URL} -O model.zip")
-            
-            # Распаковка
-            os.system("unzip model.zip")
-            
-            # Автоматическое определение структуры
-            if os.path.exists(f"{MODEL_NAME}/am/final.mdl"):
-                logger.info("Обнаружена новая структура архива")
-            elif os.path.exists(f"{MODEL_NAME}/{MODEL_NAME}/am/final.mdl"):
-                logger.info("Обнаружена старая структура - исправляем")
-                os.system(f"mv {MODEL_NAME}/{MODEL_NAME}/* {MODEL_NAME}/")
-                os.system(f"rm -rf {MODEL_NAME}/{MODEL_NAME}")
-            else:
-                raise Exception("Не удалось определить структуру архива!")
+# Загрузка модели
+model = Model(MODEL_NAME) if os.path.exists(MODEL_NAME) else None
 
-            os.system("rm model.zip")
-            
-            # Финальная проверка
-            if not os.path.exists(f"{MODEL_NAME}/am/final.mdl"):
-                raise Exception("Критические файлы модели отсутствуют!")
-            
-            logger.info("Модель успешно загружена и проверена")
-        return True
-    except Exception as e:
-        logger.error(f"Ошибка загрузки модели: {str(e)}")
-        return False
+class TranscriptionWorker(threading.Thread):
+    def __init__(self):
+        threading.Thread.__init__(self)
+        self.daemon = True
+        self.start()
 
-# Инициализация модели
-if not download_model():
-    raise RuntimeError("Не удалось инициализировать модель Vosk!")
+    def run(self):
+        while True:
+            task = TASK_QUEUE.get()
+            try:
+                process_audio_task(task)
+            except Exception as e:
+                logger.error(f"Ошибка обработки задачи: {str(e)}")
+            finally:
+                TASK_QUEUE.task_done()
 
-model = Model(MODEL_NAME)
-
-def process_audio_chunk(recognizer, audio_data):
-    """Обрабатывает кусок аудио"""
-    if recognizer.AcceptWaveform(audio_data):
-        return json.loads(recognizer.Result())
-    return None
-
-def convert_to_wav(audio_url, output_file):
-    """Конвертирует аудио в WAV с шумоподавлением"""
-    try:
-        # Скачивание файла
-        response = requests.get(audio_url, stream=True)
-        temp_input = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
-        
-        with open(temp_input.name, "wb") as f:
-            for chunk in response.iter_content(chunk_size=1024):
-                f.write(chunk)
-
-        # Конвертация с шумоподавлением
-        ffmpeg_cmd = [
-            "ffmpeg",
-            "-i", temp_input.name,
-            "-af", "arnndn=m=vosk-model-ru-0.42/rnnoise.rnn",  # Шумоподавление
-            "-ar", str(SAMPLE_RATE),
-            "-ac", "1",
-            "-y",
-            output_file
-        ]
-        subprocess.run(ffmpeg_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        
-        os.unlink(temp_input.name)
-        return output_file
-
-    except Exception as e:
-        logger.error(f"Ошибка конвертации: {str(e)}")
-        raise
-
-@app.route("/transcribe", methods=["POST"])
-def transcribe():
+def process_audio_task(task):
     start_time = time.time()
+    task_id, audio_url, webhook_url, user_id = task
+    
     try:
-        data = request.get_json()
-        audio_url = data.get("audio_url")
-        
-        if not audio_url:
-            return jsonify({"error": "Параметр 'audio_url' обязателен"}), 400
-
-        logger.info(f"Начата обработка: {audio_url}")
-
         # Создаем временные файлы
         temp_wav = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
         temp_wav.close()
 
-        # Конвертация с шумоподавлением
-        wav_file = convert_to_wav(audio_url, temp_wav.name)
-
-        # Проверка длительности аудио
-        duration_cmd = [
-            "ffprobe",
-            "-i", wav_file,
-            "-show_entries", "format=duration",
-            "-v", "quiet",
-            "-of", "csv=p=0"
+        # Конвертация аудио
+        ffmpeg_cmd = [
+            "ffmpeg",
+            "-i", audio_url,
+            "-af", "arnndn=m=vosk-model-ru-0.42/rnnoise.rnn",
+            "-ar", str(SAMPLE_RATE),
+            "-ac", "1",
+            "-y",
+            temp_wav.name
         ]
-        duration = float(subprocess.run(duration_cmd, capture_output=True, text=True).stdout)
-        
-        if duration > MAX_AUDIO_DURATION:
-            os.unlink(wav_file)
-            return jsonify({"error": f"Аудио слишком длинное (максимум {MAX_AUDIO_DURATION//60} минут)"}), 400
+        subprocess.run(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-        # Настройка распознавателя
+        # Транскрибация
         recognizer = KaldiRecognizer(model, SAMPLE_RATE)
-        recognizer.SetWords(True)  # Для лучшего распознавания слов
-
-        # Поточная обработка аудио
+        recognizer.SetWords(True)
+        
         result_text = []
-        with open(wav_file, "rb") as f:
+        with open(temp_wav.name, "rb") as f:
             while True:
                 data = f.read(CHUNK_SIZE)
                 if len(data) == 0:
                     break
-                
-                if time.time() - start_time > 55:  # Ограничение 60 сек
-                    raise TimeoutError("Превышено время обработки")
                 
                 if recognizer.AcceptWaveform(data):
                     result = json.loads(recognizer.Result())
                     if result.get("text"):
                         result_text.append(result["text"])
 
-        # Финализация результатов
         final_result = json.loads(recognizer.FinalResult())
         if final_result.get("text"):
             result_text.append(final_result["text"])
 
-        # Очистка
-        os.unlink(wav_file)
+        processing_time = time.time() - start_time
 
-        return jsonify({
+        # Отправка результата на webhook
+        payload = {
+            "task_id": task_id,
+            "user_id": user_id,
             "text": " ".join(result_text),
-            "processing_time": round(time.time() - start_time, 2),
-            "audio_duration": round(duration, 2)
+            "status": "completed",
+            "processing_time": round(processing_time, 2),
+            "timestamp": time.time()
+        }
+        
+        requests.post(webhook_url, json=payload, timeout=10)
+
+    except Exception as e:
+        error_payload = {
+            "task_id": task_id,
+            "user_id": user_id,
+            "status": "error",
+            "error": str(e),
+            "timestamp": time.time()
+        }
+        requests.post(webhook_url, json=error_payload, timeout=10)
+    finally:
+        if os.path.exists(temp_wav.name):
+            os.unlink(temp_wav.name)
+
+@app.route("/transcribe", methods=["POST"])
+def transcribe():
+    try:
+        data = request.get_json()
+        audio_url = data.get("audio_url")
+        webhook_url = data.get("webhook_url")
+        user_id = data.get("user_id")
+        
+        if not all([audio_url, webhook_url, user_id]):
+            return jsonify({"error": "Необходимы audio_url, webhook_url и user_id"}), 400
+
+        task_id = str(uuid.uuid4())
+        
+        # Проверка загрузки системы
+        if TASK_QUEUE.qsize() >= MAX_CONCURRENT_TASKS:
+            return jsonify({
+                "error": "Сервис перегружен",
+                "task_id": task_id,
+                "status": "queued"
+            }), 429
+
+        # Добавляем задачу в очередь
+        TASK_QUEUE.put((task_id, audio_url, webhook_url, user_id))
+        
+        return jsonify({
+            "status": "accepted",
+            "task_id": task_id,
+            "message": "Задача принята в обработку"
         })
 
-    except TimeoutError as e:
-        logger.error(f"Таймаут обработки: {str(e)}")
-        return jsonify({"error": "Превышено время обработки"}), 408
-        
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Ошибка загрузки: {str(e)}")
-        return jsonify({"error": "Ошибка загрузки аудио"}), 400
-        
-    except subprocess.CalledProcessError as e:
-        logger.error(f"Ошибка FFmpeg: {e.stderr.decode()}")
-        return jsonify({"error": "Ошибка обработки аудио"}), 500
-        
     except Exception as e:
-        logger.error(f"Критическая ошибка: {str(e)}")
-        return jsonify({"error": "Внутренняя ошибка сервера"}), 500
+        logger.error(f"Ошибка: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+# Запускаем воркеры
+for _ in range(MAX_CONCURRENT_TASKS):
+    TranscriptionWorker()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
