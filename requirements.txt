@@ -2,3 +2,4 @@ flask==3.0.0
 vosk==0.3.45
 requests==2.31.0
 ffmpeg-python==0.2.0
+uuid==1.30
