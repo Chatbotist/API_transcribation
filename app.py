@@ -11,8 +11,9 @@ from vosk import Model, KaldiRecognizer
 app = Flask(__name__)
 
 # Конфигурация
-MODEL_PATH = "/app/vosk-model-ru-0.42"  # Абсолютный путь
-MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-ru-0.42.zip"
+MODEL_NAME = "vosk-model-ru-0.42"
+MODEL_PATH = os.path.join(os.getcwd(), MODEL_NAME)  # Путь относительно рабочей директории
+MODEL_URL = f"https://alphacephei.com/vosk/models/{MODEL_NAME}.zip"
 SAMPLE_RATE = 16000
 CHUNK_SIZE = 4000
 MAX_WORKERS = 3  # Максимум одновременных обработок
@@ -24,22 +25,29 @@ lock = threading.Lock()
 def download_model():
     if not os.path.exists(MODEL_PATH):
         os.makedirs(MODEL_PATH, exist_ok=True)
-        os.system(f"wget {MODEL_URL} -O /app/model.zip")
-        os.system(f"unzip /app/model.zip -d {MODEL_PATH}")
-        os.system("rm /app/model.zip")
+        os.system(f"wget {MODEL_URL} -O model.zip")
+        os.system(f"unzip model.zip -d {MODEL_PATH}")
+        os.system("rm model.zip")
+        
+        # Проверка успешной распаковки
+        if not os.path.exists(os.path.join(MODEL_PATH, "am", "final.mdl")):
+            raise Exception("Failed to extract model files")
 
 # Загружаем модель при старте
-download_model()
-model = Model(MODEL_PATH)
+try:
+    download_model()
+    model = Model(MODEL_PATH)
+except Exception as e:
+    print(f"Failed to initialize model: {str(e)}")
+    raise
 
 def process_audio(task_id, audio_url, webhook_url, user_id):
     try:
         start_time = time.time()
-        
-        # Скачивание и конвертация
         temp_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
         temp_wav.close()
         
+        # Скачивание
         response = requests.get(audio_url, stream=True)
         with open(temp_wav.name, "wb") as f:
             for chunk in response.iter_content(chunk_size=1024):
@@ -95,7 +103,6 @@ def transcribe():
     if not all(k in data for k in ["audio_url", "webhook_url", "user_id"]):
         return jsonify({"error": "Missing required parameters"}), 400
 
-    # Проверяем лимит одновременных задач
     with lock:
         if len(tasks) >= MAX_WORKERS:
             return jsonify({"error": "Server busy, try again later"}), 429
@@ -106,7 +113,6 @@ def transcribe():
             "start_time": time.time()
         }
 
-    # Запускаем обработку в отдельном потоке
     thread = threading.Thread(
         target=process_audio,
         args=(task_id, data["audio_url"], data["webhook_url"], data["user_id"])
