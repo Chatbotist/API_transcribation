@@ -6,24 +6,28 @@ import requests
 import logging
 import json
 import tempfile
+from threading import Thread
+import time
 
 app = Flask(__name__)
+SetLogLevel(-1)  # Отключаем лишние логи Vosk
 
 # Настройка логов
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("Vosk-Transcriber")
-SetLogLevel(-1)  # Отключаем лишние логи Vosk
 
 # Конфигурация
 MODEL_NAME = "vosk-model-ru-0.42"  # Более точная модель
 MODEL_URL = f"https://alphacephei.com/vosk/models/{MODEL_NAME}.zip"
-AUDIO_TEMP_DIR = tempfile.mkdtemp()
+CHUNK_SIZE = 4000
+SAMPLE_RATE = 16000
+MAX_AUDIO_DURATION = 300  # 5 минут (ограничение обработки)
 
 def download_model():
-    """Скачивает и распаковывает модель Vosk"""
+    """Скачивает и распаковывает улучшенную модель Vosk"""
     try:
         if not os.path.exists(MODEL_NAME):
-            logger.info(f"Скачивание модели {MODEL_NAME}...")
+            logger.info(f"Скачивание улучшенной модели {MODEL_NAME}...")
             
             # Скачивание
             os.system(f"wget {MODEL_URL} -O model.zip")
@@ -59,28 +63,46 @@ if not download_model():
 
 model = Model(MODEL_NAME)
 
-def preprocess_audio(input_path, output_path):
-    """Обработка аудио с шумоподавлением и нормализацией"""
+def process_audio_chunk(recognizer, audio_data):
+    """Обрабатывает кусок аудио"""
+    if recognizer.AcceptWaveform(audio_data):
+        return json.loads(recognizer.Result())
+    return None
+
+def convert_to_wav(audio_url, output_file):
+    """Конвертирует аудио в WAV с шумоподавлением"""
     try:
+        # Скачивание файла
+        response = requests.get(audio_url, stream=True)
+        temp_input = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+        
+        with open(temp_input.name, "wb") as f:
+            for chunk in response.iter_content(chunk_size=1024):
+                f.write(chunk)
+
+        # Конвертация с шумоподавлением
         ffmpeg_cmd = [
             "ffmpeg",
-            "-i", input_path,
-            "-af", "highpass=f=200,lowpass=f=3000,afftdn=nf=-25,volume=2.0",
-            "-ar", "16000",
+            "-i", temp_input.name,
+            "-af", "arnndn=m=vosk-model-ru-0.42/rnnoise.rnn",  # Шумоподавление
+            "-ar", str(SAMPLE_RATE),
             "-ac", "1",
             "-y",
-            output_path
+            output_file
         ]
         subprocess.run(ffmpeg_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        return True
+        
+        os.unlink(temp_input.name)
+        return output_file
+
     except Exception as e:
-        logger.error(f"Ошибка обработки аудио: {str(e)}")
-        return False
+        logger.error(f"Ошибка конвертации: {str(e)}")
+        raise
 
 @app.route("/transcribe", methods=["POST"])
 def transcribe():
+    start_time = time.time()
     try:
-        # Получение URL аудио
         data = request.get_json()
         audio_url = data.get("audio_url")
         
@@ -89,57 +111,76 @@ def transcribe():
 
         logger.info(f"Начата обработка: {audio_url}")
 
-        # Временные файлы
-        temp_input = os.path.join(AUDIO_TEMP_DIR, "input.mp3")
-        temp_processed = os.path.join(AUDIO_TEMP_DIR, "processed.wav")
+        # Создаем временные файлы
+        temp_wav = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+        temp_wav.close()
 
-        # Скачивание файла
-        response = requests.get(audio_url, stream=True)
-        with open(temp_input, "wb") as f:
-            for chunk in response.iter_content(chunk_size=1024):
-                f.write(chunk)
+        # Конвертация с шумоподавлением
+        wav_file = convert_to_wav(audio_url, temp_wav.name)
 
-        # Предобработка аудио
-        if not preprocess_audio(temp_input, temp_processed):
-            return jsonify({"error": "Ошибка обработки аудио"}), 500
+        # Проверка длительности аудио
+        duration_cmd = [
+            "ffprobe",
+            "-i", wav_file,
+            "-show_entries", "format=duration",
+            "-v", "quiet",
+            "-of", "csv=p=0"
+        ]
+        duration = float(subprocess.run(duration_cmd, capture_output=True, text=True).stdout)
+        
+        if duration > MAX_AUDIO_DURATION:
+            os.unlink(wav_file)
+            return jsonify({"error": f"Аудио слишком длинное (максимум {MAX_AUDIO_DURATION//60} минут)"}), 400
 
-        # Транскрибация с улучшенными параметрами
-        recognizer = KaldiRecognizer(model, 16000)
-        recognizer.SetWords(True)  # Включаем распознавание отдельных слов
-        recognizer.SetPartialWords(True)
+        # Настройка распознавателя
+        recognizer = KaldiRecognizer(model, SAMPLE_RATE)
+        recognizer.SetWords(True)  # Для лучшего распознавания слов
 
-        with open(temp_processed, "rb") as f:
+        # Поточная обработка аудио
+        result_text = []
+        with open(wav_file, "rb") as f:
             while True:
-                data = f.read(4000)
+                data = f.read(CHUNK_SIZE)
                 if len(data) == 0:
                     break
-                recognizer.AcceptWaveform(data)
+                
+                if time.time() - start_time > 55:  # Ограничение 60 сек
+                    raise TimeoutError("Превышено время обработки")
+                
+                if recognizer.AcceptWaveform(data):
+                    result = json.loads(recognizer.Result())
+                    if result.get("text"):
+                        result_text.append(result["text"])
 
-        # Получаем и парсим результат
-        result = json.loads(recognizer.FinalResult())
-        transcription_text = result.get("text", "")
+        # Финализация результатов
+        final_result = json.loads(recognizer.FinalResult())
+        if final_result.get("text"):
+            result_text.append(final_result["text"])
 
         # Очистка
-        for file in [temp_input, temp_processed]:
-            if os.path.exists(file):
-                os.remove(file)
+        os.unlink(wav_file)
 
         return jsonify({
-            "text": transcription_text,
-            "status": "success"
+            "text": " ".join(result_text),
+            "processing_time": round(time.time() - start_time, 2),
+            "audio_duration": round(duration, 2)
         })
 
+    except TimeoutError as e:
+        logger.error(f"Таймаут обработки: {str(e)}")
+        return jsonify({"error": "Превышено время обработки"}), 408
+        
     except requests.exceptions.RequestException as e:
         logger.error(f"Ошибка загрузки: {str(e)}")
-        return jsonify({"error": "Ошибка загрузки аудио", "status": "error"}), 400
+        return jsonify({"error": "Ошибка загрузки аудио"}), 400
         
     except subprocess.CalledProcessError as e:
         logger.error(f"Ошибка FFmpeg: {e.stderr.decode()}")
-        return jsonify({"error": "Ошибка обработки аудио", "status": "error"}), 500
+        return jsonify({"error": "Ошибка обработки аудио"}), 500
         
     except Exception as e:
         logger.error(f"Критическая ошибка: {str(e)}")
-        return jsonify({"error": "Внутренняя ошибка сервера", "status": "error"}), 500
+        return jsonify({"error": "Внутренняя ошибка сервера"}), 500
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
