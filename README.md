@@ -1,15 +1,17 @@
-# Улучшенный Audio Transcriber API
+# Асинхронный Audio Transcriber API
 
 ## Особенности:
-- Использует улучшенную модель **vosk-model-ru-0.42**
-- Автоматическое шумоподавление (RNNoise)
-- Ограничение времени обработки (60 сек)
-- Поддержка длинных аудио (до 5 минут)
-- Поточная обработка для быстрого ответа
+- Асинхронная обработка через webhook
+- Поддержка множества пользователей
+- Очередь задач с приоритетом
+- Шумоподавление и улучшенное качество
+- Отслеживание статуса задач
 
 ## API Endpoint
 **POST /transcribe**
 ```json
 {
-  "audio_url": "https://example.com/audio.mp3"
+  "audio_url": "https://example.com/audio.mp3",
+  "webhook_url": "https://your-service.com/webhook",
+  "user_id": "12345"
 }
