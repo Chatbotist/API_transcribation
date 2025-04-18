@@ -4,9 +4,9 @@ services:
     env: python
     region: frankfurt
     buildCommand: |
-      wget https://alphacephei.com/vosk/models/vosk-model-ru-0.42.zip -O model.zip
+      wget https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip -O model.zip
       unzip model.zip
       rm model.zip
       pip install -r requirements.txt
-    startCommand: python app.py
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 2
     plan: free
