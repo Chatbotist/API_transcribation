@@ -4,10 +4,9 @@ services:
     env: python
     region: frankfurt
     buildCommand: |
-      mkdir -p /app/vosk-model-ru-0.42
-      wget https://alphacephei.com/vosk/models/vosk-model-ru-0.42.zip -O /app/model.zip
-      unzip /app/model.zip -d /app/vosk-model-ru-0.42
-      rm /app/model.zip
+      wget https://alphacephei.com/vosk/models/vosk-model-ru-0.42.zip -O model.zip
+      unzip model.zip
+      rm model.zip
       pip install -r requirements.txt
     startCommand: python app.py
     plan: free
