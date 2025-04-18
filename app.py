@@ -1,8 +1,9 @@
 import os
 import json
-import time
-import queue
+import tempfile
 import threading
+import time
+import subprocess
 import requests
 from flask import Flask, request, jsonify
 from vosk import Model, KaldiRecognizer
@@ -10,104 +11,121 @@ from vosk import Model, KaldiRecognizer
 app = Flask(__name__)
 
 # Конфигурация
-MODEL_NAME = "vosk-model-small-ru-0.22"  # Облегченная модель
+MODEL_PATH = "/app/vosk-model-ru-0.42"  # Абсолютный путь
+MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-ru-0.42.zip"
 SAMPLE_RATE = 16000
 CHUNK_SIZE = 4000
-MAX_WORKERS = 3  # Максимальное количество параллельных обработчиков
+MAX_WORKERS = 3  # Максимум одновременных обработок
 
-# Очередь задач и модель
-task_queue = queue.Queue()
-model = Model(MODEL_NAME)
+# Очередь задач
+tasks = {}
+lock = threading.Lock()
 
-def worker():
-    """Фоновый обработчик задач"""
-    while True:
-        task = task_queue.get()
-        try:
-            process_audio_task(task)
-        except Exception as e:
-            send_webhook(task['webhook_url'], {
-                'user_id': task['user_id'],
-                'status': 'error',
-                'error': str(e)
-            })
-        finally:
-            task_queue.task_done()
+def download_model():
+    if not os.path.exists(MODEL_PATH):
+        os.makedirs(MODEL_PATH, exist_ok=True)
+        os.system(f"wget {MODEL_URL} -O /app/model.zip")
+        os.system(f"unzip /app/model.zip -d {MODEL_PATH}")
+        os.system("rm /app/model.zip")
 
-def process_audio_task(task):
-    """Обрабатывает аудио и отправляет результат"""
-    start_time = time.time()
-    
+# Загружаем модель при старте
+download_model()
+model = Model(MODEL_PATH)
+
+def process_audio(task_id, audio_url, webhook_url, user_id):
     try:
-        # Скачивание аудио
-        audio_data = requests.get(task['audio_url'], stream=True).raw
+        start_time = time.time()
         
-        # Инициализация распознавателя
-        rec = KaldiRecognizer(model, SAMPLE_RATE)
-        rec.SetWords(True)
+        # Скачивание и конвертация
+        temp_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        temp_wav.close()
         
-        # Поточная обработка
-        result = []
-        while True:
-            data = audio_data.read(CHUNK_SIZE)
-            if not data:
-                break
-            if rec.AcceptWaveform(data):
-                part = json.loads(rec.Result())
-                if part.get('text'):
-                    result.append(part['text'])
+        response = requests.get(audio_url, stream=True)
+        with open(temp_wav.name, "wb") as f:
+            for chunk in response.iter_content(chunk_size=1024):
+                f.write(chunk)
+
+        # Транскрибация
+        recognizer = KaldiRecognizer(model, SAMPLE_RATE)
+        recognizer.SetWords(True)
         
-        # Финализация
-        final = json.loads(rec.FinalResult())
-        if final.get('text'):
-            result.append(final['text'])
-        
+        result_text = []
+        with open(temp_wav.name, "rb") as f:
+            while True:
+                data = f.read(CHUNK_SIZE)
+                if len(data) == 0:
+                    break
+                if recognizer.AcceptWaveform(data):
+                    res = json.loads(recognizer.Result())
+                    if res.get("text"):
+                        result_text.append(res["text"])
+
+        final_res = json.loads(recognizer.FinalResult())
+        if final_res.get("text"):
+            result_text.append(final_res["text"])
+
+        os.unlink(temp_wav.name)
+        processing_time = round(time.time() - start_time, 2)
+
         # Отправка результата
-        send_webhook(task['webhook_url'], {
-            'user_id': task['user_id'],
-            'status': 'completed',
-            'text': ' '.join(result),
-            'processing_time': round(time.time() - start_time, 2)
-        })
-        
-    except Exception as e:
-        send_webhook(task['webhook_url'], {
-            'user_id': task['user_id'],
-            'status': 'error',
-            'error': str(e)
-        })
+        payload = {
+            "user_id": user_id,
+            "text": " ".join(result_text),
+            "processing_time": processing_time,
+            "status": "completed",
+            "task_id": task_id
+        }
+        requests.post(webhook_url, json=payload)
 
-def send_webhook(url, data):
-    """Отправка результата на webhook"""
-    try:
-        requests.post(url, json=data, timeout=5)
     except Exception as e:
-        app.logger.error(f"Webhook error: {str(e)}")
+        payload = {
+            "user_id": user_id,
+            "error": str(e),
+            "status": "failed",
+            "task_id": task_id
+        }
+        requests.post(webhook_url, json=payload)
+    finally:
+        with lock:
+            del tasks[task_id]
 
-@app.route('/transcribe', methods=['POST'])
+@app.route("/transcribe", methods=["POST"])
 def transcribe():
     data = request.get_json()
-    
-    # Валидация
-    if not data.get('audio_url') or not data.get('webhook_url') or not data.get('user_id'):
-        return jsonify({'error': 'Missing required parameters'}), 400
-    
-    # Добавляем задачу в очередь
-    task_queue.put({
-        'audio_url': data['audio_url'],
-        'webhook_url': data['webhook_url'],
-        'user_id': data['user_id']
-    })
-    
+    if not all(k in data for k in ["audio_url", "webhook_url", "user_id"]):
+        return jsonify({"error": "Missing required parameters"}), 400
+
+    # Проверяем лимит одновременных задач
+    with lock:
+        if len(tasks) >= MAX_WORKERS:
+            return jsonify({"error": "Server busy, try again later"}), 429
+
+        task_id = str(int(time.time() * 1000))
+        tasks[task_id] = {
+            "status": "processing",
+            "start_time": time.time()
+        }
+
+    # Запускаем обработку в отдельном потоке
+    thread = threading.Thread(
+        target=process_audio,
+        args=(task_id, data["audio_url"], data["webhook_url"], data["user_id"])
+    )
+    thread.start()
+
     return jsonify({
-        'status': 'queued',
-        'message': 'Request accepted for processing'
+        "task_id": task_id,
+        "status": "queued",
+        "message": "Processing started"
     })
 
-# Запуск фоновых обработчиков
-for _ in range(MAX_WORKERS):
-    threading.Thread(target=worker, daemon=True).start()
+@app.route("/status/<task_id>", methods=["GET"])
+def get_status(task_id):
+    with lock:
+        task = tasks.get(task_id, None)
+    if not task:
+        return jsonify({"error": "Task not found"}), 404
+    return jsonify(task)
 
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
