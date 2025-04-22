@@ -4,9 +4,10 @@ services:
     env: python
     region: frankfurt
     buildCommand: |
-      wget https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip
-      unzip -j vosk-model-small-ru-0.22.zip '*/am/final.mdl' '*/conf/mfcc.conf' '*/graph/phones.txt' -d vosk-model-small-ru-0.22
-      rm vosk-model-small-ru-0.22.zip
+      mkdir -p vosk-model-small-ru-0.22
+      wget https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip -O model.zip
+      unzip model.zip -d vosk-model-small-ru-0.22
+      rm model.zip
       pip install -r requirements.txt
     startCommand: python app.py
     plan: free
