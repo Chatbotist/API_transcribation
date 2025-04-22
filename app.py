@@ -9,6 +9,7 @@ import tempfile
 from threading import Thread
 import time
 import uuid
+from datetime import datetime
 
 app = Flask(__name__)
 SetLogLevel(-1)  # Отключаем лишние логи Vosk
@@ -18,42 +19,37 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("Vosk-Transcriber")
 
 # Конфигурация
-MODEL_NAME = "vosk-model-ru-0.42"  # Более точная модель
+MODEL_NAME = "vosk-model-small-ru-0.22"  # Используем меньшую модель для экономии памяти
 MODEL_URL = f"https://alphacephei.com/vosk/models/{MODEL_NAME}.zip"
 CHUNK_SIZE = 4000
 SAMPLE_RATE = 16000
-MAX_AUDIO_DURATION = 300  # 5 минут (ограничение обработки)
-MAX_SYNC_PROCESSING_TIME = 55  # Максимальное время для синхронного ответа (сек)
+MAX_AUDIO_DURATION = 180  # 3 минуты (ограничение для бесплатного тарифа)
+MAX_SYNC_PROCESSING_TIME = 50  # Максимальное время для синхронного ответа (сек)
+
+# Глобальный статус сервера
+SERVER_STATUS = {
+    "status": "available",
+    "last_check": datetime.utcnow().isoformat(),
+    "active_tasks": 0
+}
 
 def download_model():
-    """Скачивает и распаковывает улучшенную модель Vosk"""
+    """Скачивает и распаковывает модель Vosk с оптимизацией памяти"""
     try:
         if not os.path.exists(MODEL_NAME):
-            logger.info(f"Скачивание улучшенной модели {MODEL_NAME}...")
+            logger.info(f"Скачивание модели {MODEL_NAME}...")
             
             # Скачивание
             os.system(f"wget {MODEL_URL} -O model.zip")
             
-            # Распаковка
-            os.system("unzip model.zip")
-            
-            # Автоматическое определение структуры архива
-            if os.path.exists(f"{MODEL_NAME}/am/final.mdl"):
-                logger.info("Обнаружена новая структура архива")
-            elif os.path.exists(f"{MODEL_NAME}/{MODEL_NAME}/am/final.mdl"):
-                logger.info("Обнаружена старая структура - исправляем")
-                os.system(f"mv {MODEL_NAME}/{MODEL_NAME}/* {MODEL_NAME}/")
-                os.system(f"rm -rf {MODEL_NAME}/{MODEL_NAME}")
-            else:
-                raise Exception("Не удалось определить структуру архива!")
-
+            # Распаковка с удалением ненужных файлов
+            os.system("unzip -j model.zip '*/am/final.mdl' '*/conf/mfcc.conf' '*/graph/phones.txt' -d ${MODEL_NAME}")
             os.system("rm model.zip")
             
-            # Финальная проверка
-            if not os.path.exists(f"{MODEL_NAME}/am/final.mdl"):
+            if not os.path.exists(f"{MODEL_NAME}/final.mdl"):
                 raise Exception("Критические файлы модели отсутствуют!")
             
-            logger.info("Модель успешно загружена и проверена")
+            logger.info("Модель успешно загружена и оптимизирована")
         return True
     except Exception as e:
         logger.error(f"Ошибка загрузки модели: {str(e)}")
@@ -65,53 +61,61 @@ if not download_model():
 
 model = Model(MODEL_NAME)
 
-def process_audio_chunk(recognizer, audio_data):
-    """Обрабатывает кусок аудио"""
-    if recognizer.AcceptWaveform(audio_data):
-        return json.loads(recognizer.Result())
-    return None
+def cleanup_files(*files):
+    """Удаление временных файлов"""
+    for file in files:
+        try:
+            if file and os.path.exists(file):
+                os.unlink(file)
+        except Exception as e:
+            logger.warning(f"Ошибка удаления файла {file}: {str(e)}")
 
-def convert_to_wav(audio_url, output_file):
-    """Конвертирует аудио в WAV с шумоподавлением"""
+def convert_to_wav(audio_url):
+    """Конвертирует аудио в WAV с оптимизацией памяти"""
+    temp_input = None
+    temp_output = None
     try:
-        # Скачивание файла
+        # Скачивание файла потоком
         response = requests.get(audio_url, stream=True)
         temp_input = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
         
         with open(temp_input.name, "wb") as f:
-            for chunk in response.iter_content(chunk_size=1024):
+            for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
 
-        # Конвертация с шумоподавлением
+        # Создаем временный выходной файл
+        temp_output = tempfile.NamedTemporaryFile(delete=False, suffix=".wav").name
+
+        # Конвертация с базовыми параметрами
         ffmpeg_cmd = [
             "ffmpeg",
             "-i", temp_input.name,
-            "-af", "arnndn=m=vosk-model-ru-0.42/rnnoise.rnn",  # Шумоподавление
             "-ar", str(SAMPLE_RATE),
             "-ac", "1",
             "-y",
-            output_file
+            temp_output
         ]
         subprocess.run(ffmpeg_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         
-        os.unlink(temp_input.name)
-        return output_file
+        return temp_output
 
     except Exception as e:
         logger.error(f"Ошибка конвертации: {str(e)}")
+        cleanup_files(temp_input.name if temp_input else None, temp_output)
         raise
+    finally:
+        cleanup_files(temp_input.name if temp_input else None)
 
-def transcribe_audio(audio_url, processing_start_time):
-    """Основная функция транскрибации аудио"""
+def transcribe_audio(audio_url, task_id, user_id=None):
+    """Основная функция транскрибации аудио с оптимизацией памяти"""
+    start_time = time.time()
+    wav_file = None
     try:
-        logger.info(f"Начата обработка: {audio_url}")
+        SERVER_STATUS["active_tasks"] += 1
+        logger.info(f"Начата обработка задачи {task_id}")
 
-        # Создаем временные файлы
-        temp_wav = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
-        temp_wav.close()
-
-        # Конвертация с шумоподавлением
-        wav_file = convert_to_wav(audio_url, temp_wav.name)
+        # Конвертация
+        wav_file = convert_to_wav(audio_url)
 
         # Проверка длительности аудио
         duration_cmd = [
@@ -124,12 +128,11 @@ def transcribe_audio(audio_url, processing_start_time):
         duration = float(subprocess.run(duration_cmd, capture_output=True, text=True).stdout)
         
         if duration > MAX_AUDIO_DURATION:
-            os.unlink(wav_file)
-            return {"error": f"Аудио слишком длинное (максимум {MAX_AUDIO_DURATION//60} минут)"}, 400
+            raise ValueError(f"Аудио слишком длинное (максимум {MAX_AUDIO_DURATION//60} минут)")
 
         # Настройка распознавателя
         recognizer = KaldiRecognizer(model, SAMPLE_RATE)
-        recognizer.SetWords(True)  # Для лучшего распознавания слов
+        recognizer.SetWords(True)
 
         # Поточная обработка аудио
         result_text = []
@@ -138,9 +141,6 @@ def transcribe_audio(audio_url, processing_start_time):
                 data = f.read(CHUNK_SIZE)
                 if len(data) == 0:
                     break
-                
-                if time.time() - processing_start_time > MAX_SYNC_PROCESSING_TIME:
-                    raise TimeoutError("Превышено время обработки")
                 
                 if recognizer.AcceptWaveform(data):
                     result = json.loads(recognizer.Result())
@@ -152,90 +152,134 @@ def transcribe_audio(audio_url, processing_start_time):
         if final_result.get("text"):
             result_text.append(final_result["text"])
 
-        # Очистка
-        os.unlink(wav_file)
+        full_text = " ".join(result_text)
+        is_full = len(full_text) > 0 and duration < (MAX_AUDIO_DURATION * 0.8)
 
         return {
-            "text": " ".join(result_text),
-            "processing_time": round(time.time() - processing_start_time, 2),
-            "audio_duration": round(duration, 2)
-        }, None
+            "status": "success",
+            "text": full_text,
+            "user_id": user_id,
+            "id": task_id,
+            "time_start": start_time,
+            "time_end": time.time(),
+            "is_full": is_full,
+            "audio_duration": duration
+        }, 200 if is_full else 201
 
-    except TimeoutError as e:
-        logger.error(f"Таймаут обработки: {str(e)}")
-        return {"error": "Превышено время обработки"}, 408
-        
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Ошибка загрузки: {str(e)}")
-        return {"error": "Ошибка загрузки аудио"}, 400
-        
-    except subprocess.CalledProcessError as e:
-        logger.error(f"Ошибка FFmpeg: {e.stderr.decode()}")
-        return {"error": "Ошибка обработки аудио"}, 500
-        
+    except ValueError as e:
+        logger.error(f"Ошибка валидации для задачи {task_id}: {str(e)}")
+        return {
+            "status": "error",
+            "error": str(e),
+            "id": task_id,
+            "time_start": start_time,
+            "time_end": time.time()
+        }, 400
     except Exception as e:
-        logger.error(f"Критическая ошибка: {str(e)}")
-        return {"error": "Внутренняя ошибка сервера"}, 500
+        logger.error(f"Критическая ошибка для задачи {task_id}: {str(e)}")
+        return {
+            "status": "error",
+            "error": "Internal server error",
+            "id": task_id,
+            "time_start": start_time,
+            "time_end": time.time()
+        }, 500
+    finally:
+        cleanup_files(wav_file)
+        SERVER_STATUS["active_tasks"] -= 1
+        SERVER_STATUS["last_check"] = datetime.utcnow().isoformat()
 
-def send_webhook_result(webhook_url, result, user_id=None):
+def send_webhook_result(webhook_url, result):
     """Отправляет результат на вебхук"""
     try:
-        payload = {
-            "result": result,
-            "metadata": {
-                "user_id": user_id,
-                "timestamp": time.time()
-            }
-        }
-        response = requests.post(webhook_url, json=payload, timeout=10)
+        response = requests.post(webhook_url, json=result, timeout=10)
         response.raise_for_status()
-        logger.info(f"Результат успешно отправлен на вебхук: {webhook_url}")
+        logger.info(f"Результат для задачи {result.get('id')} отправлен на вебхук")
     except Exception as e:
-        logger.error(f"Ошибка отправки на вебхук: {str(e)}")
+        logger.error(f"Ошибка отправки вебхука для задачи {result.get('id')}: {str(e)}")
+
+@app.route("/health", methods=["GET"])
+def health_check():
+    """Проверка статуса сервера"""
+    try:
+        status_code = 200 if SERVER_STATUS["status"] == "available" else 503
+        return jsonify({
+            "status": SERVER_STATUS["status"],
+            "last_check": SERVER_STATUS["last_check"],
+            "active_tasks": SERVER_STATUS["active_tasks"]
+        }), status_code
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
 
 @app.route("/transcribe", methods=["POST"])
-def transcribe():
-    start_time = time.time()
+def sync_transcribe():
+    """Синхронный эндпоинт для транскрибации"""
     try:
         data = request.get_json()
-        
-        # Проверка обязательных параметров
         audio_url = data.get("audio_url")
-        webhook_url = data.get("webhook_url")
         user_id = data.get("user_id")
         
         if not audio_url:
-            return jsonify({"error": "Параметр 'audio_url' обязателен"}), 400
+            return jsonify({"status": "error", "error": "audio_url is required"}), 400
 
-        # Асинхронная обработка с вебхуком
-        if webhook_url:
-            # Генерируем ID задачи для отслеживания
-            task_id = str(uuid.uuid4())
-            
-            # Запускаем в отдельном потоке
-            def async_task():
-                result, status_code = transcribe_audio(audio_url, time.time())
-                if status_code:
-                    result["status_code"] = status_code
-                send_webhook_result(webhook_url, result, user_id)
-            
-            Thread(target=async_task).start()
-            
-            return jsonify({
-                "message": "Обработка начата, результат будет отправлен на вебхук",
-                "task_id": task_id,
-                "webhook_url": webhook_url
-            }), 202
+        task_id = str(uuid.uuid4())
+        result, status_code = transcribe_audio(audio_url, task_id, user_id)
         
-        # Синхронная обработка
-        result, status_code = transcribe_audio(audio_url, start_time)
-        if status_code:
-            return jsonify(result), status_code
-        return jsonify(result)
+        # Форматирование времени для ответа
+        result["time_start"] = int(result["time_start"])
+        result["time_end"] = int(result["time_end"])
+        
+        return jsonify(result), status_code
 
     except Exception as e:
-        logger.error(f"Ошибка в основном обработчике: {str(e)}")
-        return jsonify({"error": "Внутренняя ошибка сервера"}), 500
+        logger.error(f"Ошибка в синхронном обработчике: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "error": "Internal server error"
+        }), 500
+
+@app.route("/transcribeAsync", methods=["POST"])
+def async_transcribe():
+    """Асинхронный эндпоинт для транскрибации"""
+    try:
+        data = request.get_json()
+        audio_url = data.get("audio_url")
+        user_id = data.get("user_id")
+        webhook_url = data.get("webhook_url")
+        
+        if not audio_url or not webhook_url:
+            return jsonify({
+                "status": "error",
+                "error": "audio_url and webhook_url are required"
+            }), 400
+
+        task_id = str(uuid.uuid4())
+        start_time = time.time()
+        
+        # Запуск в отдельном потоке
+        def async_task():
+            result, _ = transcribe_audio(audio_url, task_id, user_id)
+            result["webhook_url"] = webhook_url
+            result["time_start"] = int(start_time)
+            result["time_end"] = int(time.time())
+            send_webhook_result(webhook_url, result)
+        
+        Thread(target=async_task).start()
+        
+        return jsonify({
+            "status": "started",
+            "id": task_id,
+            "time_start": int(start_time),
+            "webhook_url": webhook_url,
+            "user_id": user_id
+        }), 202
+
+    except Exception as e:
+        logger.error(f"Ошибка в асинхронном обработчике: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "error": "Internal server error"
+        }), 500
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
