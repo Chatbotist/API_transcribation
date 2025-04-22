@@ -19,7 +19,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("Vosk-Transcriber")
 
 # Конфигурация
-MODEL_NAME = "model"  # Упрощенное имя директории
+MODEL_DIR = "vosk-model"
 MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip"
 CHUNK_SIZE = 4000
 SAMPLE_RATE = 16000
@@ -35,46 +35,58 @@ SERVER_STATUS = {
 
 TASKS = {}
 tasks_lock = Lock()
+model = None
 
-def download_model():
-    """Исправленная функция загрузки модели"""
+def setup_model_directory():
+    """Надежная настройка директории модели"""
     try:
-        if not os.path.exists(MODEL_NAME):
+        # 1. Скачивание архива
+        if not os.path.exists("model.zip"):
             logger.info("Скачивание модели...")
-            
-            # Скачивание и распаковка в текущую директорию
-            os.system(f"wget {MODEL_URL} -O model.zip")
-            os.system("unzip model.zip -d model_tmp")
-            os.system("mv model_tmp/vosk-model-small-ru-0.22 model")
-            os.system("rm -rf model_tmp model.zip")
-            
-            # Проверка критических файлов
-            required_files = [
-                "model/am/final.mdl",
-                "model/conf/mfcc.conf",
-                "model/graph/phones.txt"
-            ]
-            
-            if not all(os.path.exists(f) for f in required_files):
-                raise Exception("Критические файлы модели отсутствуют!")
-            
-            logger.info("Модель успешно загружена")
+            subprocess.run(["wget", MODEL_URL, "-O", "model.zip"], check=True)
+        
+        # 2. Очистка и создание директории
+        if os.path.exists(MODEL_DIR):
+            subprocess.run(["rm", "-rf", MODEL_DIR])
+        os.makedirs(MODEL_DIR, exist_ok=True)
+        
+        # 3. Распаковка только нужных файлов
+        subprocess.run(["unzip", "model.zip", "vosk-model-small-ru-0.22/*", "-d", MODEL_DIR], check=True)
+        subprocess.run(["mv", f"{MODEL_DIR}/vosk-model-small-ru-0.22/*", f"{MODEL_DIR}/"], check=True)
+        subprocess.run(["rm", "-rf", f"{MODEL_DIR}/vosk-model-small-ru-0.22", "model.zip"], check=True)
+        
+        # 4. Проверка критических файлов
+        required_files = [
+            f"{MODEL_DIR}/am/final.mdl",
+            f"{MODEL_DIR}/conf/mfcc.conf",
+            f"{MODEL_DIR}/graph/phones.txt"
+        ]
+        
+        missing_files = [f for f in required_files if not os.path.exists(f)]
+        if missing_files:
+            raise Exception(f"Отсутствуют критические файлы: {missing_files}")
+        
+        logger.info("Модель успешно загружена и проверена")
         return True
+        
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Ошибка выполнения команды: {e.stderr.decode()}")
+        return False
     except Exception as e:
-        logger.error(f"Ошибка загрузки модели: {str(e)}")
+        logger.error(f"Ошибка настройки модели: {str(e)}")
         return False
 
-# Инициализация модели
-if not download_model():
-    logger.error("Не удалось загрузить модель Vosk!")
-    SERVER_STATUS["status"] = "unavailable"
-else:
+# Инициализация модели при старте
+if setup_model_directory():
     try:
-        model = Model(MODEL_NAME)
-        logger.info("Модель Vosk инициализирована")
+        model = Model(MODEL_DIR)
+        logger.info("Модель Vosk успешно инициализирована")
     except Exception as e:
         logger.error(f"Ошибка инициализации модели: {str(e)}")
         SERVER_STATUS["status"] = "unavailable"
+else:
+    logger.error("Не удалось настроить модель Vosk!")
+    SERVER_STATUS["status"] = "unavailable"
 
 def cleanup_files(*files):
     for file in files:
@@ -133,6 +145,9 @@ def transcribe_audio(audio_url, task_id, user_id=None):
         update_task_status(task_id, "processing")
         logger.info(f"Начата обработка задачи {task_id}")
 
+        if not model:
+            raise Exception("Модель Vosk не загружена")
+
         wav_file = convert_to_wav(audio_url)
 
         duration_cmd = [
@@ -156,6 +171,9 @@ def transcribe_audio(audio_url, task_id, user_id=None):
                 data = f.read(CHUNK_SIZE)
                 if len(data) == 0:
                     break
+                
+                if time.time() - start_time > MAX_SYNC_PROCESSING_TIME:
+                    raise TimeoutError("Превышено время обработки")
                 
                 if recognizer.AcceptWaveform(data):
                     result = json.loads(recognizer.Result())
@@ -208,12 +226,12 @@ def send_webhook_result(webhook_url, result):
 @app.route("/health", methods=["GET"])
 def health_check():
     try:
-        status_code = 200 if SERVER_STATUS["status"] == "available" else 503
+        status_code = 200 if SERVER_STATUS["status"] == "available" and model else 503
         return jsonify({
             "status": SERVER_STATUS["status"],
+            "model_loaded": bool(model),
             "last_check": SERVER_STATUS["last_check"],
-            "active_tasks": SERVER_STATUS["active_tasks"],
-            "model_loaded": "model" in globals()
+            "active_tasks": SERVER_STATUS["active_tasks"]
         }), status_code
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)}), 500
@@ -244,7 +262,7 @@ def task_status():
 @app.route("/transcribe", methods=["POST"])
 def sync_transcribe():
     try:
-        if SERVER_STATUS["status"] != "available":
+        if SERVER_STATUS["status"] != "available" or not model:
             return jsonify({"status": "error", "error": "Сервер недоступен"}), 503
 
         data = request.get_json()
@@ -267,7 +285,7 @@ def sync_transcribe():
 @app.route("/transcribeAsync", methods=["POST"])
 def async_transcribe():
     try:
-        if SERVER_STATUS["status"] != "available":
+        if SERVER_STATUS["status"] != "available" or not model:
             return jsonify({"status": "error", "error": "Сервер недоступен"}), 503
 
         data = request.get_json()
