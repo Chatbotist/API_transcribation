@@ -16,11 +16,14 @@ app = Flask(__name__)
 SetLogLevel(-1)
 
 # Настройка логов
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger("Vosk-Transcriber")
 
 # Конфигурация
-MODEL_DIR = "vosk-model"
+MODEL_DIR = "model"
 MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip"
 CHUNK_SIZE = 4000
 SAMPLE_RATE = 16000
@@ -39,13 +42,18 @@ tasks_lock = Lock()
 model = None
 
 def setup_model_directory():
-    """Надежная настройка директории модели с улучшенной обработкой ошибок"""
+    """Полная установка модели с гарантированным расположением файлов"""
     try:
-        logger.info("Начало установки модели Vosk...")
+        logger.info("Начало установки модели Vosk")
+
+        # 1. Очистка предыдущей установки
+        if os.path.exists(MODEL_DIR):
+            logger.info("Удаление старой версии модели")
+            shutil.rmtree(MODEL_DIR)
         
-        # 1. Скачивание архива
+        # 2. Скачивание архива
         if not os.path.exists("model.zip"):
-            logger.info("Скачивание модели с %s...", MODEL_URL)
+            logger.info("Скачивание модели с %s", MODEL_URL)
             result = subprocess.run(
                 ["wget", MODEL_URL, "-O", "model.zip"],
                 capture_output=True,
@@ -54,43 +62,44 @@ def setup_model_directory():
             if result.returncode != 0:
                 raise Exception(f"Ошибка скачивания: {result.stderr}")
 
-        # 2. Очистка и создание директории
-        if os.path.exists(MODEL_DIR):
-            logger.info("Очистка существующей директории модели...")
-            shutil.rmtree(MODEL_DIR)
+        # 3. Создание целевой директории
         os.makedirs(MODEL_DIR, exist_ok=True)
 
-        # 3. Распаковка во временную директорию
-        logger.info("Распаковка модели...")
-        temp_dir = "temp_model"
-        if os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
-        
+        # 4. Распаковка архива
+        logger.info("Распаковка модели")
         result = subprocess.run(
-            ["unzip", "model.zip", "-d", temp_dir],
+            ["unzip", "model.zip", "-d", MODEL_DIR],
             capture_output=True,
             text=True
         )
         if result.returncode != 0:
             raise Exception(f"Ошибка распаковки: {result.stderr}")
 
-        # 4. Перемещение файлов в целевую директорию
-        logger.info("Перенос файлов модели...")
-        src_dir = os.path.join(temp_dir, "vosk-model-small-ru-0.22")
-        if not os.path.exists(src_dir):
-            raise Exception("Не найдена распакованная директория модели")
+        # 5. Поиск фактического пути к модели
+        model_path = None
+        for root, dirs, files in os.walk(MODEL_DIR):
+            if "final.mdl" in files and root.endswith("am"):
+                model_path = os.path.dirname(root)
+                break
 
-        for item in os.listdir(src_dir):
-            src_path = os.path.join(src_dir, item)
-            dst_path = os.path.join(MODEL_DIR, item)
-            
-            if os.path.isdir(src_path):
-                shutil.copytree(src_path, dst_path)
-            else:
-                shutil.copy2(src_path, dst_path)
+        if not model_path:
+            raise Exception("Не удалось найти файлы модели после распаковки")
 
-        # 5. Проверка критических файлов
-        logger.info("Проверка файлов модели...")
+        # 6. Если модель в поддиректории, перемещаем файлы
+        if model_path != MODEL_DIR:
+            logger.info("Перенос файлов модели из %s в %s", model_path, MODEL_DIR)
+            for item in os.listdir(model_path):
+                src = os.path.join(model_path, item)
+                dst = os.path.join(MODEL_DIR, item)
+                if os.path.exists(dst):
+                    if os.path.isdir(dst):
+                        shutil.rmtree(dst)
+                    else:
+                        os.remove(dst)
+                shutil.move(src, dst)
+            shutil.rmtree(model_path)
+
+        # 7. Проверка обязательных файлов
         required_files = [
             os.path.join(MODEL_DIR, "am", "final.mdl"),
             os.path.join(MODEL_DIR, "conf", "mfcc.conf"),
@@ -103,32 +112,30 @@ def setup_model_directory():
                 missing_files.append(file_path)
         
         if missing_files:
-            raise Exception(f"Отсутствуют критические файлы модели: {missing_files}")
+            raise Exception(f"Отсутствуют обязательные файлы: {missing_files}")
 
-        logger.info("Модель успешно установлена и проверена")
+        logger.info("Модель успешно установлена в %s", MODEL_DIR)
         return True
 
     except Exception as e:
-        logger.error("Ошибка установки модели: %s", str(e))
+        logger.error("Критическая ошибка установки модели: %s", str(e))
         return False
     finally:
         # Всегда очищаем временные файлы
-        if os.path.exists("temp_model"):
-            shutil.rmtree("temp_model", ignore_errors=True)
         if os.path.exists("model.zip"):
             try:
                 os.remove("model.zip")
-            except:
-                pass
+            except Exception as e:
+                logger.warning("Ошибка удаления model.zip: %s", str(e))
 
 # Инициализация модели при старте
 if setup_model_directory():
     try:
-        logger.info("Инициализация модели Vosk...")
+        logger.info("Инициализация модели Vosk")
         model = Model(MODEL_DIR)
-        logger.info("Модель Vosk успешно инициализирована")
+        logger.info("Модель Vosk успешно загружена")
     except Exception as e:
-        logger.error("Ошибка инициализации модели: %s", str(e))
+        logger.error("Ошибка загрузки модели: %s", str(e))
         SERVER_STATUS["status"] = "unavailable"
 else:
     logger.error("Не удалось установить модель Vosk!")
@@ -184,16 +191,14 @@ def convert_to_wav(audio_url):
         if result.returncode != 0:
             raise Exception(f"Ошибка ffmpeg: {result.stderr}")
         
-        logger.info("Аудио успешно сконвертировано")
+        logger.info("Аудио успешно сконвертировано в %s", temp_output)
         return temp_output
 
     except Exception as e:
         logger.error("Ошибка конвертации аудио: %s", str(e))
-        cleanup_files(temp_input.name if temp_input else None, temp_output)
         raise
     finally:
-        if temp_input and os.path.exists(temp_input.name):
-            cleanup_files(temp_input.name)
+        cleanup_files(temp_input.name if temp_input else None)
 
 def update_task_status(task_id, status, result=None):
     """Обновление статуса задачи с блокировкой"""
