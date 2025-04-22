@@ -6,17 +6,91 @@ services:
     buildCommand: |
       pip install -r requirements.txt
       python -c "
-      import os, subprocess;
-      print('Установка модели Vosk...');
-      subprocess.run(['wget', 'https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip', '-O', 'model.zip'], check=True);
-      os.makedirs('vosk-model', exist_ok=True);
-      subprocess.run(['unzip', 'model.zip', 'vosk-model-small-ru-0.22/*', '-d', 'vosk-model'], check=True);
-      subprocess.run(['mv', 'vosk-model/vosk-model-small-ru-0.22/*', 'vosk-model/'], check=True);
-      subprocess.run(['rm', '-rf', 'vosk-model/vosk-model-small-ru-0.22', 'model.zip'], check=True);
-      print('Проверка файлов модели...');
-      required_files = ['vosk-model/am/final.mdl', 'vosk-model/conf/mfcc.conf', 'vosk-model/graph/phones.txt'];
-      assert all(os.path.exists(f) for f in required_files), 'Отсутствуют критические файлы модели';
-      print('Модель успешно установлена');
+      import os, subprocess, shutil, logging;
+      
+      logging.basicConfig(level=logging.INFO);
+      logger = logging.getLogger('Vosk-Installer');
+      
+      def install_model():
+          try:
+              # 1. Скачивание
+              logger.info('Скачивание модели...');
+              if os.path.exists('model.zip'):
+                  os.remove('model.zip');
+              
+              result = subprocess.run(
+                  ['wget', 'https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip', '-O', 'model.zip'],
+                  capture_output=True,
+                  text=True
+              );
+              
+              if result.returncode != 0:
+                  raise Exception(f'Ошибка скачивания: {result.stderr}');
+              
+              # 2. Очистка и создание директорий
+              if os.path.exists('vosk-model'):
+                  shutil.rmtree('vosk-model');
+              os.makedirs('vosk-model', exist_ok=True);
+              
+              # 3. Распаковка
+              logger.info('Распаковка модели...');
+              temp_dir = 'temp_model';
+              if os.path.exists(temp_dir):
+                  shutil.rmtree(temp_dir);
+              
+              result = subprocess.run(
+                  ['unzip', 'model.zip', '-d', temp_dir],
+                  capture_output=True,
+                  text=True
+              );
+              
+              if result.returncode != 0:
+                  raise Exception(f'Ошибка распаковки: {result.stderr}');
+              
+              # 4. Перенос файлов
+              logger.info('Перенос файлов модели...');
+              src_dir = os.path.join(temp_dir, 'vosk-model-small-ru-0.22');
+              if not os.path.exists(src_dir):
+                  raise Exception('Не найдена директория модели после распаковки');
+              
+              for item in os.listdir(src_dir):
+                  src = os.path.join(src_dir, item);
+                  dst = os.path.join('vosk-model', item);
+                  
+                  if os.path.isdir(src):
+                      shutil.copytree(src, dst);
+                  else:
+                      shutil.copy2(src, dst);
+              
+              # 5. Проверка файлов
+              logger.info('Проверка файлов модели...');
+              required = [
+                  'vosk-model/am/final.mdl',
+                  'vosk-model/conf/mfcc.conf',
+                  'vosk-model/graph/phones.txt'
+              ];
+              
+              missing = [f for f in required if not os.path.exists(f)];
+              if missing:
+                  raise Exception(f'Отсутствуют критические файлы: {missing}');
+              
+              logger.info('Модель успешно установлена');
+              return True;
+          
+          except Exception as e:
+              logger.error(f'Ошибка установки: {str(e)}');
+              return False;
+          finally:
+              # Очистка
+              if os.path.exists(temp_dir):
+                  shutil.rmtree(temp_dir, ignore_errors=True);
+              if os.path.exists('model.zip'):
+                  try:
+                      os.remove('model.zip');
+                  except:
+                      pass;
+      
+      install_model();
       "
     startCommand: python app.py
     plan: free
@@ -25,3 +99,5 @@ services:
         value: "1"
       - key: MAX_AUDIO_DURATION
         value: "180"
+      - key: LOG_LEVEL
+        value: "INFO"
