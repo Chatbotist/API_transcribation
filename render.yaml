@@ -4,11 +4,20 @@ services:
     env: python
     region: frankfurt
     buildCommand: |
-      wget https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip -O model.zip
-      unzip model.zip -d model_tmp
-      mv model_tmp/vosk-model-small-ru-0.22 model
-      rm -rf model_tmp model.zip
       pip install -r requirements.txt
+      python -c "
+      import os, subprocess;
+      print('Установка модели Vosk...');
+      subprocess.run(['wget', 'https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip', '-O', 'model.zip'], check=True);
+      os.makedirs('vosk-model', exist_ok=True);
+      subprocess.run(['unzip', 'model.zip', 'vosk-model-small-ru-0.22/*', '-d', 'vosk-model'], check=True);
+      subprocess.run(['mv', 'vosk-model/vosk-model-small-ru-0.22/*', 'vosk-model/'], check=True);
+      subprocess.run(['rm', '-rf', 'vosk-model/vosk-model-small-ru-0.22', 'model.zip'], check=True);
+      print('Проверка файлов модели...');
+      required_files = ['vosk-model/am/final.mdl', 'vosk-model/conf/mfcc.conf', 'vosk-model/graph/phones.txt'];
+      assert all(os.path.exists(f) for f in required_files), 'Отсутствуют критические файлы модели';
+      print('Модель успешно установлена');
+      "
     startCommand: python app.py
     plan: free
     envVars:
