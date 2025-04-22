@@ -5,7 +5,7 @@
 ### Эндпоинты:
 
 1. **Синхронная транскрибация** (`POST /transcribe`)
-   - Параметры (тело запроса JSON):
+   - Параметры (JSON):
      - `audio_url` (обязательный) - URL аудиофайла
      - `user_id` (обязательный) - ID пользователя
    - Ответ:
@@ -13,8 +13,8 @@
      {
        "status": "success|error",
        "text": "Транскрибированный текст",
-       "user_id": "id123",
-       "id": "id_операции",
+       "user_id": "user123",
+       "id": "task_id",
        "time_start": 1713829200,
        "time_end": 1713829215,
        "is_full": true,
@@ -28,43 +28,37 @@
      - 503 - Сервер недоступен
 
 2. **Асинхронная транскрибация** (`POST /transcribeAsync`)
-   - Параметры (тело запроса JSON):
+   - Параметры (JSON):
      - `audio_url` (обязательный)
      - `user_id` (обязательный)
-     - `webhook_url` (обязательный)
+     - `webhook_url` (обязательный) - URL для callback
    - Ответ:
      ```json
      {
        "status": "started",
-       "id": "id_операции",
+       "id": "task_id",
        "time_start": 1713829200,
        "webhook_url": "https://your-webhook.url",
-       "user_id": "id123"
+       "user_id": "user123"
      }
      ```
-   - Коды статуса:
-     - 202 - Задача принята
-     - 400 - Ошибка в запросе
-     - 503 - Сервер недоступен
+   - Вебхук получит результат в формате синхронного ответа
 
 3. **Проверка статуса задачи** (`GET /taskStatus`)
-   - Параметры (query string):
+   - Параметры (query):
      - `id` (обязательный) - ID задачи
    - Ответ:
      ```json
      {
        "status": "success",
+       "task_id": "task_id",
        "task_status": "processing|completed|failed",
        "result": { ... },
-       "last_update": "2025-04-22T18:30:45",
-       "id": "id_операции"
+       "last_update": "2025-04-22T18:30:45"
      }
      ```
-   - Коды статуса:
-     - 200 - Успешно
-     - 404 - Задача не найдена
 
-4. **Проверка здоровья сервера** (`GET /health`)
+4. **Проверка здоровья** (`GET /health`)
    - Ответ:
      ```json
      {
@@ -77,8 +71,8 @@
 
 ## Примеры запросов
 
-### Синхронная транскрибация:
+### Синхронный запрос:
 ```bash
 curl -X POST -H "Content-Type: application/json" \
--d '{"audio_url":"https://example.com/audio.mp3", "user_id":"id123"}' \
+-d '{"audio_url":"https://example.com/audio.mp3", "user_id":"user123"}' \
 http://your-service.onrender.com/transcribe
