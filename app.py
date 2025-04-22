@@ -33,6 +33,15 @@ MAX_SYNC_PROCESSING_TIME = 55
 AUDIO_STORAGE = "temp_audio"
 os.makedirs(AUDIO_STORAGE, exist_ok=True)
 
+# Параметры TTS по умолчанию
+DEFAULT_TTS_PARAMS = {
+    'lang': 'ru',
+    'slow': False,
+    'speed': 1.0,
+    'pitch': 1.0,
+    'volume': 1.0
+}
+
 # Глобальные переменные состояния
 SERVER_STATUS = {
     "status": "available",
@@ -227,20 +236,52 @@ def transcribe_audio(audio_url, task_id, user_id=None):
         SERVER_STATUS["active_tasks"] = max(0, SERVER_STATUS["active_tasks"] - 1)
         SERVER_STATUS["last_check"] = datetime.utcnow().isoformat()
 
-def generate_audio(text, task_id, user_id=None):
-    """Генерация аудио из текста"""
+def generate_audio(text, task_id, user_id=None, tts_params=None):
+    """Генерация аудио из текста с настройками"""
     start_time = time.time()
     try:
         SERVER_STATUS["active_tasks"] += 1
         update_task_status(task_id, "processing")
 
-        # Генерация аудио
-        tts = gTTS(text=text, lang='ru')
+        if not text or len(text) > 1000:
+            raise ValueError("Текст должен быть от 1 до 1000 символов")
+
+        # Слияние параметров с defaults
+        params = {**DEFAULT_TTS_PARAMS, **(tts_params or {})}
+        
+        # Валидация параметров
+        params['speed'] = max(0.5, min(2.0, float(params['speed'])))
+        params['pitch'] = max(0.5, min(1.5, float(params['pitch'])))
+        params['volume'] = max(0.1, min(1.0, float(params['volume'])))
+        
+        # Генерация аудио с настройками
+        tts = gTTS(
+            text=text,
+            lang=params['lang'],
+            slow=params['slow']
+        )
+        
+        # Сохраняем во временный файл
         filename = f"{uuid.uuid4()}.mp3"
         filepath = os.path.join(AUDIO_STORAGE, filename)
         tts.save(filepath)
-
-        audio_url = f"{request.host_url}audio/{filename}"
+        
+        # Применяем дополнительные эффекты через ffmpeg
+        output_file = os.path.join(AUDIO_STORAGE, f"processed_{filename}")
+        ffmpeg_cmd = [
+            "ffmpeg",
+            "-i", filepath,
+            "-filter:a",
+            f"atempo={params['speed']},asetrate=44100*{params['pitch']},volume={params['volume']}",
+            "-y",
+            output_file
+        ]
+        subprocess.run(ffmpeg_cmd, check=True)
+        
+        # Удаляем исходный файл
+        os.remove(filepath)
+        
+        audio_url = f"{request.host_url}audio/processed_{filename}"
         
         result_data = {
             "status": "success",
@@ -248,9 +289,10 @@ def generate_audio(text, task_id, user_id=None):
             "id": task_id,
             "user_id": user_id,
             "time_start": start_time,
-            "time_end": time.time()
+            "time_end": time.time(),
+            "params": params
         }
-
+        
         update_task_status(task_id, "completed", result_data)
         return result_data, 200
 
@@ -402,12 +444,13 @@ def text_to_audio():
         data = request.get_json()
         text = data.get("text")
         user_id = data.get("user_id")
+        tts_params = data.get("tts_params", {})
         
         if not text or not user_id:
             return jsonify({"status": "error", "error": "Необходимы text и user_id"}), 400
 
         task_id = str(uuid.uuid4())
-        result, status_code = generate_audio(text, task_id, user_id)
+        result, status_code = generate_audio(text, task_id, user_id, tts_params)
         
         result["time_start"] = int(result["time_start"])
         result["time_end"] = int(result["time_end"])
@@ -424,6 +467,7 @@ def async_text_to_audio():
         text = data.get("text")
         user_id = data.get("user_id")
         webhook_url = data.get("webhook_url")
+        tts_params = data.get("tts_params", {})
         
         if not text or not user_id:
             return jsonify({"status": "error", "error": "Необходимы text и user_id"}), 400
@@ -432,7 +476,7 @@ def async_text_to_audio():
         start_time = time.time()
         
         def async_task():
-            result, _ = generate_audio(text, task_id, user_id)
+            result, _ = generate_audio(text, task_id, user_id, tts_params)
             if webhook_url:
                 result["webhook_url"] = webhook_url
                 send_webhook_result(webhook_url, result)
