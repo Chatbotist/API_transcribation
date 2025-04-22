@@ -2,14 +2,16 @@ services:
   - type: web
     name: audio-transcriber
     env: python
-    region: frankfurt  # Ближайший к России регион
+    region: frankfurt
     buildCommand: |
-      wget https://alphacephei.com/vosk/models/vosk-model-ru-0.42.zip
-      unzip vosk-model-ru-0.42.zip
-      rm vosk-model-ru-0.42.zip
+      wget https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip
+      unzip -j vosk-model-small-ru-0.22.zip '*/am/final.mdl' '*/conf/mfcc.conf' '*/graph/phones.txt' -d vosk-model-small-ru-0.22
+      rm vosk-model-small-ru-0.22.zip
       pip install -r requirements.txt
     startCommand: python app.py
     plan: free
     envVars:
       - key: PYTHONUNBUFFERED
         value: "1"
+      - key: MAX_AUDIO_DURATION
+        value: "180"
