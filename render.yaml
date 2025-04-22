@@ -4,101 +4,27 @@ services:
     env: python
     region: frankfurt
     buildCommand: |
+      wget https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip -O model.zip
+      unzip model.zip
+      
+      # Автодетект структуры
+      if [ -f "vosk-model-small-ru-0.22/am/final.mdl" ]; then
+          echo "Обнаружена новая структура архива"
+      elif [ -f "vosk-model-small-ru-0.22/vosk-model-small-ru-0.22/am/final.mdl" ]; then
+          echo "Обнаружена старая структура - исправляем"
+          mv vosk-model-small-ru-0.22/vosk-model-small-ru-0.22/* vosk-model-small-ru-0.22/
+          rm -rf vosk-model-small-ru-0.22/vosk-model-small-ru-0.22
+      else
+          echo "ОШИБКА: Неверная структура архива!"
+          exit 1
+      fi
+      
+      rm model.zip
       pip install -r requirements.txt
-      python -c "
-      import os, subprocess, shutil, logging;
-      
-      logging.basicConfig(level=logging.INFO);
-      logger = logging.getLogger('Model-Installer');
-      
-      MODEL_DIR = 'model';
-      MODEL_URL = 'https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip';
-      
-      try:
-          # 1. Cleanup
-          if os.path.exists(MODEL_DIR):
-              logger.info('Removing old model directory');
-              shutil.rmtree(MODEL_DIR);
-          
-          # 2. Download
-          logger.info('Downloading model...');
-          result = subprocess.run(
-              ['wget', MODEL_URL, '-O', 'model.zip'],
-              capture_output=True,
-              text=True
-          );
-          if result.returncode != 0:
-              raise Exception(f'Download failed: {result.stderr}');
-          
-          # 3. Create target directory
-          os.makedirs(MODEL_DIR, exist_ok=True);
-          
-          # 4. Unzip
-          logger.info('Unzipping model...');
-          result = subprocess.run(
-              ['unzip', 'model.zip', '-d', MODEL_DIR],
-              capture_output=True,
-              text=True
-          );
-          if result.returncode != 0:
-              raise Exception(f'Unzip failed: {result.stderr}');
-          
-          # 5. Find actual model path
-          model_path = None;
-          for root, dirs, files in os.walk(MODEL_DIR):
-              if 'final.mdl' in files and root.endswith('am'):
-                  model_path = os.path.dirname(root);
-                  break;
-          
-          if not model_path:
-              raise Exception('Could not find model files after extraction');
-          
-          # 6. Move files if needed
-          if model_path != MODEL_DIR:
-              logger.info(f'Moving files from {model_path} to {MODEL_DIR}');
-              for item in os.listdir(model_path):
-                  src = os.path.join(model_path, item);
-                  dst = os.path.join(MODEL_DIR, item);
-                  if os.path.exists(dst):
-                      if os.path.isdir(dst):
-                          shutil.rmtree(dst);
-                      else:
-                          os.remove(dst);
-                  shutil.move(src, dst);
-              shutil.rmtree(model_path);
-          
-          # 7. Verify critical files
-          required_files = [
-              os.path.join(MODEL_DIR, 'am', 'final.mdl'),
-              os.path.join(MODEL_DIR, 'conf', 'mfcc.conf'),
-              os.path.join(MODEL_DIR, 'graph', 'phones.txt')
-          ];
-          
-          missing_files = [];
-          for file_path in required_files:
-              if not os.path.exists(file_path):
-                  missing_files.append(file_path);
-          
-          if missing_files:
-              raise Exception(f'Missing required files: {missing_files}');
-          
-          logger.info('Model successfully installed');
-      except Exception as e:
-          logger.error(f'Installation failed: {str(e)}');
-          raise;
-      finally:
-          if os.path.exists('model.zip'):
-              try:
-                  os.remove('model.zip');
-              except Exception as e:
-                  logger.warning(f'Error removing model.zip: {str(e)}');
-      "
     startCommand: python app.py
     plan: free
     envVars:
       - key: PYTHONUNBUFFERED
         value: "1"
       - key: MAX_AUDIO_DURATION
-        value: "180"
-      - key: LOG_LEVEL
-        value: "INFO"
+        value: "300"
