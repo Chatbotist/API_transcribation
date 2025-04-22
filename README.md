@@ -76,19 +76,25 @@
 curl -X POST -H "Content-Type: application/json" \
 -d '{"audio_url":"https://example.com/audio.mp3", "user_id":"user123"}' \
 http://your-service.onrender.com/transcribe
+```
 
-Асинхронный запрос:
-bash
+### Асинхронный запрос:
+http://your-service.onrender.com/transcribeAsync
+```bash
 curl -X POST -H "Content-Type: application/json" \
 -d '{
   "audio_url":"https://example.com/audio.mp3",
   "user_id":"user123",
   "webhook_url":"https://your-webhook.url"
-}' \
-http://your-service.onrender.com/transcribeAsync
-Проверка статуса:
-bash
+}'
+```
+ \
+
+### Проверка статуса:
+```bash
 curl -X GET "http://your-service.onrender.com/taskStatus?id=task_id_123"
+```
+
 Развертывание на Render.com
 Скопируйте следующие файлы в репозиторий:
 
@@ -104,6 +110,7 @@ runtime.txt - Версия Python
 
 yaml
 # render.yaml
+```
 services:
   - type: web
     name: audio-transcriber
@@ -127,6 +134,8 @@ services:
       pip install -r requirements.txt
     startCommand: python app.py
     plan: free
+```
+
 Ограничения
 Длина аудио: Максимум 5 минут (300 секунд)
 
