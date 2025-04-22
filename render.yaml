@@ -2,11 +2,14 @@ services:
   - type: web
     name: audio-transcriber
     env: python
-    region: frankfurt
+    region: frankfurt  # Ближайший к России регион
     buildCommand: |
-      wget https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip -O model.zip
-      unzip model.zip
-      rm model.zip
+      wget https://alphacephei.com/vosk/models/vosk-model-ru-0.42.zip
+      unzip vosk-model-ru-0.42.zip
+      rm vosk-model-ru-0.42.zip
       pip install -r requirements.txt
-    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 2
+    startCommand: python app.py
     plan: free
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
