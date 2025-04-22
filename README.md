@@ -72,10 +72,10 @@
 ## Примеры запросов
 
 ### Синхронный запрос:
+http://your-service.onrender.com/transcribe
 ```bash
 curl -X POST -H "Content-Type: application/json" \
 -d '{"audio_url":"https://example.com/audio.mp3", "user_id":"user123"}' \
-http://your-service.onrender.com/transcribe
 ```
 
 ### Асинхронный запрос:
