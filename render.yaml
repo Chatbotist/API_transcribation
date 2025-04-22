@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: audio-transcriber
+    name: audio-processor
     env: python
     region: frankfurt
     buildCommand: |
@@ -9,9 +9,9 @@ services:
       
       # Автодетект структуры
       if [ -f "vosk-model-small-ru-0.22/am/final.mdl" ]; then
-          echo "Обнаружена новая структура архива"
+          echo "Новая структура архива"
       elif [ -f "vosk-model-small-ru-0.22/vosk-model-small-ru-0.22/am/final.mdl" ]; then
-          echo "Обнаружена старая структура - исправляем"
+          echo "Старая структура - исправляем"
           mv vosk-model-small-ru-0.22/vosk-model-small-ru-0.22/* vosk-model-small-ru-0.22/
           rm -rf vosk-model-small-ru-0.22/vosk-model-small-ru-0.22
       else
