@@ -213,6 +213,7 @@ def transcribe_audio(audio_url, task_id, user_id=None):
 def generate_audio(text, task_id, user_id=None, tts_params=None):
     """Генерация аудио из текста с поддержкой Telegram Voice"""
     start_time = time.time()
+    temp_file = None
     try:
         SERVER_STATUS["active_tasks"] += 1
         update_task_status(task_id, "processing")
@@ -259,41 +260,26 @@ def generate_audio(text, task_id, user_id=None, tts_params=None):
         temp_file = os.path.join(AUDIO_STORAGE, f"temp_{uuid.uuid4()}.mp3")
         tts.save(temp_file)
 
-        # Обработка через ffmpeg с метаданными и параметрами
+        # Оптимизированные параметры для Telegram Voice (OGG/Opus)
         ffmpeg_cmd = [
             "ffmpeg",
             "-i", temp_file,
-            "-metadata", "title=Голосовое сообщение",
-            "-metadata", "artist=Ai assistant",
-            "-filter:a",
-            f"atempo={params['speed']},asetrate=44100*{params['pitch']},volume={params['volume']}",
-            "-y"
+            "-c:a", "libopus",  # Используем кодек Opus
+            "-b:a", "64k",      # Битрейт 64k
+            "-ar", "48000",     # Частота дискретизации 48kHz
+            "-ac", "1",        # Моно
+            "-vbr", "on",       # Включить переменный битрейт
+            "-compression_level", "10",  # Максимальное сжатие
+            "-application", "voip",       # Оптимизация для голоса
+            "-y",
+            filepath
         ]
 
-        # Параметры кодирования для разных форматов
-        if params['format'] == 'ogg':
-            ffmpeg_cmd.extend([
-                "-c:a", "libvorbis",
-                "-q:a", "4",  # Качество для OGG
-                "-ar", "48000",  # Частота для Telegram Voice
-                filepath
-            ])
-        elif params['format'] == 'opus':
-            ffmpeg_cmd.extend([
-                "-c:a", "libopus",
-                "-b:a", "64k",
-                "-ar", "48000",
-                filepath
-            ])
-        else:  # MP3
-            ffmpeg_cmd.extend([
-                "-c:a", "libmp3lame",
-                "-q:a", "2",
-                filepath
-            ])
+        # Удаляем все метаданные
+        ffmpeg_cmd.insert(1, "-map_metadata")
+        ffmpeg_cmd.insert(2, "-1")
 
         subprocess.run(ffmpeg_cmd, check=True)
-        cleanup_files(temp_file)
 
         # Запланировать удаление файла через 5 минут
         Thread(target=lambda: (
@@ -327,6 +313,7 @@ def generate_audio(text, task_id, user_id=None, tts_params=None):
         update_task_status(task_id, "failed", error_data)
         return error_data, 400
     finally:
+        cleanup_files(temp_file)
         SERVER_STATUS["active_tasks"] = max(0, SERVER_STATUS["active_tasks"] - 1)
         SERVER_STATUS["last_check"] = datetime.utcnow().isoformat()
 
@@ -498,7 +485,7 @@ def get_audio(filename):
     try:
         # Определяем Content-Type по расширению файла
         if filename.endswith('.ogg'):
-            mimetype = 'audio/ogg'
+            mimetype = 'audio/ogg; codecs=opus'
         elif filename.endswith('.opus'):
             mimetype = 'audio/opus'
         elif filename.endswith('.mp3'):
