@@ -10,7 +10,7 @@ import tempfile
 from threading import Thread, Lock
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 import shutil
 
 app = Flask(__name__)
@@ -32,6 +32,7 @@ MAX_AUDIO_DURATION = 300
 MAX_SYNC_PROCESSING_TIME = 55
 AUDIO_STORAGE = "temp_audio"
 os.makedirs(AUDIO_STORAGE, exist_ok=True)
+FILE_LIFETIME = 300  # 5 минут в секундах
 
 # Глобальные переменные состояния
 SERVER_STATUS = {
@@ -237,73 +238,77 @@ def generate_audio(text, task_id, user_id=None, tts_params=None):
         if not text or len(text) > 1000:
             raise ValueError("Текст должен быть от 1 до 1000 символов")
 
-        # Если параметры не переданы, используем базовую генерацию без обработки
-        if not tts_params:
-            tts = gTTS(text=text, lang='ru')
-            filename = f"{uuid.uuid4()}.mp3"
-            filepath = os.path.join(AUDIO_STORAGE, filename)
-            tts.save(filepath)
-            
-            audio_url = f"{request.host_url}audio/{filename}"
-            
-            result_data = {
-                "status": "success",
-                "audio_url": audio_url,
-                "id": task_id,
-                "user_id": user_id,
-                "time_start": start_time,
-                "time_end": time.time(),
-                "params": {
-                    "message": "Использованы параметры по умолчанию без обработки"
-                }
-            }
-        else:
-            # Если параметры переданы, применяем их с обработкой через ffmpeg
-            params = {
-                'speed': float(tts_params.get('speed', 1.0)),
-                'pitch': float(tts_params.get('pitch', 1.0)),
-                'volume': float(tts_params.get('volume', 1.0))
-            }
+        # Формат выходного файла
+        output_format = tts_params.get('format', 'ogg').lower() if tts_params else 'ogg'
+        if output_format not in ['ogg', 'mp3', 'opus']:
+            output_format = 'ogg'
 
-            # Генерация исходного аудио
-            tts = gTTS(
-                text=text,
-                lang=tts_params.get('lang', 'ru'),
-                slow=tts_params.get('slow', False)
-            )
-            
-            # Сохраняем исходный файл
-            raw_file = os.path.join(AUDIO_STORAGE, f"raw_{uuid.uuid4()}.mp3")
-            tts.save(raw_file)
+        # Генерация имени файла
+        timestamp = datetime.now().strftime("%d-%m-%Y_%H-%M-%S")
+        filename = f"VoiceMessage_{timestamp}.{output_format}"
+        filepath = os.path.join(AUDIO_STORAGE, filename)
 
-            # Обработка через ffmpeg
-            processed_file = os.path.join(AUDIO_STORAGE, f"processed_{uuid.uuid4()}.mp3")
-            
-            ffmpeg_cmd = [
-                "ffmpeg",
-                "-i", raw_file,
-                "-filter:a",
-                f"atempo={params['speed']},"  # Скорость
-                f"asetrate=44100*{params['pitch']},"  # Высота тона
-                f"volume={params['volume']}",  # Громкость
-                "-y",
-                processed_file
-            ]
-            
-            subprocess.run(ffmpeg_cmd, check=True)
-            cleanup_files(raw_file)
-            
-            audio_url = f"{request.host_url}audio/{os.path.basename(processed_file)}"
-            
-            result_data = {
-                "status": "success",
-                "audio_url": audio_url,
-                "id": task_id,
-                "user_id": user_id,
-                "time_start": start_time,
-                "time_end": time.time(),
-                "params": params
-            }
+        # Метаданные
+        metadata = {
+            'title': 'Голосовое сообщение',
+            'artist': 'Ai assistant'
+        }
+
+        # Генерация аудио
+        tts = gTTS(text=text, lang='ru')
+        
+        # Сохраняем временный файл
+        temp_file = os.path.join(AUDIO_STORAGE, f"temp_{uuid.uuid4()}.mp3")
+        tts.save(temp_file)
+
+        # Конвертация в нужный формат с метаданными
+        ffmpeg_cmd = [
+            "ffmpeg",
+            "-i", temp_file,
+            "-metadata", f"title={metadata['title']}",
+            "-metadata", f"artist={metadata['artist']}",
+            "-y"
+        ]
+
+        # Параметры для разных форматов
+        if output_format == 'ogg':
+            ffmpeg_cmd.extend([
+                "-c:a", "libvorbis",
+                "-q:a", "4",
+                filepath
+            ])
+        elif output_format == 'opus':
+            ffmpeg_cmd.extend([
+                "-c:a", "libopus",
+                "-b:a", "64k",
+                filepath
+            ])
+        else:  # mp3
+            ffmpeg_cmd.extend([
+                "-c:a", "libmp3lame",
+                "-q:a", "2",
+                filepath
+            ])
+
+        subprocess.run(ffmpeg_cmd, check=True)
+        cleanup_files(temp_file)
+
+        # Запланировать удаление файла через 5 минут
+        deletion_time = datetime.now() + timedelta(seconds=FILE_LIFETIME)
+        Thread(target=delayed_file_removal, args=(filepath, deletion_time)).start()
+
+        audio_url = f"{request.host_url}audio/{filename}"
+        
+        result_data = {
+            "status": "success",
+            "audio_url": audio_url,
+            "id": task_id,
+            "user_id": user_id,
+            "time_start": start_time,
+            "time_end": time.time(),
+            "format": output_format,
+            "metadata": metadata
+        }
 
         update_task_status(task_id, "completed", result_data)
         return result_data, 200
@@ -321,6 +326,18 @@ def generate_audio(text, task_id, user_id=None, tts_params=None):
     finally:
         SERVER_STATUS["active_tasks"] = max(0, SERVER_STATUS["active_tasks"] - 1)
         SERVER_STATUS["last_check"] = datetime.utcnow().isoformat()
+
+def delayed_file_removal(filepath, removal_time):
+    """Удаление файла в указанное время"""
+    try:
+        while datetime.now() < removal_time:
+            time.sleep(10)
+        
+        if os.path.exists(filepath):
+            os.remove(filepath)
+            logger.info(f"Файл {filepath} удален по истечении времени жизни")
+    except Exception as e:
+        logger.error(f"Ошибка при удалении файла {filepath}: {str(e)}")
 
 def send_webhook_result(webhook_url, result):
     """Отправка результата на вебхук"""
@@ -343,7 +360,7 @@ def cleanup_old_audio():
             now = time.time()
             for f in os.listdir(AUDIO_STORAGE):
                 filepath = os.path.join(AUDIO_STORAGE, f)
-                if os.path.isfile(filepath) and (now - os.path.getmtime(filepath)) > 3600:
+                if os.path.isfile(filepath) and (now - os.path.getmtime(filepath)) > FILE_LIFETIME:
                     os.remove(filepath)
         except Exception as e:
             logger.error(f"Ошибка очистки аудио: {str(e)}")
@@ -456,7 +473,7 @@ def text_to_audio():
         data = request.get_json()
         text = data.get("text")
         user_id = data.get("user_id")
-        tts_params = data.get("tts_params")
+        tts_params = data.get("tts_params", {})
         
         if not text or not user_id:
             return jsonify({"status": "error", "error": "Необходимы text и user_id"}), 400
@@ -479,7 +496,7 @@ def async_text_to_audio():
         text = data.get("text")
         user_id = data.get("user_id")
         webhook_url = data.get("webhook_url")
-        tts_params = data.get("tts_params")
+        tts_params = data.get("tts_params", {})
         
         if not text or not user_id:
             return jsonify({"status": "error", "error": "Необходимы text и user_id"}), 400
