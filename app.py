@@ -33,17 +33,6 @@ MAX_SYNC_PROCESSING_TIME = 55
 AUDIO_STORAGE = "temp_audio"
 os.makedirs(AUDIO_STORAGE, exist_ok=True)
 
-# Оптимальные параметры для естественного голоса
-DEFAULT_TTS_PARAMS = {
-    'lang': 'ru',
-    'slow': False,
-    'speed': 1.08,      # Оптимальная скорость речи (1.0-1.15)
-    'pitch': 0.98,      # Легкое понижение тона (0.95-1.0)
-    'volume': 0.92,     # Оптимальная громкость (0.9-0.95)
-    'bass_boost': 3,    # Усиление низких частот (2-4 dB)
-    'treble_cut': -4    # Снижение высоких частот (-3 to -5 dB)
-}
-
 # Глобальные переменные состояния
 SERVER_STATUS = {
     "status": "available",
@@ -239,7 +228,7 @@ def transcribe_audio(audio_url, task_id, user_id=None):
         SERVER_STATUS["last_check"] = datetime.utcnow().isoformat()
 
 def generate_audio(text, task_id, user_id=None, tts_params=None):
-    """Генерация аудио с естественным звучанием голоса"""
+    """Генерация аудио из текста"""
     start_time = time.time()
     try:
         SERVER_STATUS["active_tasks"] += 1
@@ -248,75 +237,74 @@ def generate_audio(text, task_id, user_id=None, tts_params=None):
         if not text or len(text) > 1000:
             raise ValueError("Текст должен быть от 1 до 1000 символов")
 
-        # Слияние параметров с оптимальными значениями по умолчанию
-        params = {**DEFAULT_TTS_PARAMS, **(tts_params or {})}
-        
-        # Финализация параметров
-        final_params = {
-            'speed': max(0.8, min(1.5, float(params.get('speed', 1.08)))),
-            'pitch': max(0.8, min(1.2, float(params.get('pitch', 0.98)))),
-            'volume': max(0.1, min(1.0, float(params.get('volume', 0.92)))),
-            'bass_boost': max(0, min(6, int(params.get('bass_boost', 3)))),
-            'treble_cut': max(-6, min(0, int(params.get('treble_cut', -4)))),
-            'lang': params.get('lang', 'ru'),
-            'slow': bool(params.get('slow', False))
-        }
+        # Если параметры не переданы, используем базовую генерацию без обработки
+        if not tts_params:
+            tts = gTTS(text=text, lang='ru')
+            filename = f"{uuid.uuid4()}.mp3"
+            filepath = os.path.join(AUDIO_STORAGE, filename)
+            tts.save(filepath)
+            
+            audio_url = f"{request.host_url}audio/{filename}"
+            
+            result_data = {
+                "status": "success",
+                "audio_url": audio_url,
+                "id": task_id,
+                "user_id": user_id,
+                "time_start": start_time,
+                "time_end": time.time(),
+                "params": {
+                    "message": "Использованы параметры по умолчанию без обработки"
+                }
+            }
+        else:
+            # Если параметры переданы, применяем их с обработкой через ffmpeg
+            params = {
+                'speed': float(tts_params.get('speed', 1.0)),
+                'pitch': float(tts_params.get('pitch', 1.0)),
+                'volume': float(tts_params.get('volume', 1.0))
+            }
 
-        # Генерация исходного аудио
-        tts = gTTS(
-            text=text,
-            lang=final_params['lang'],
-            slow=final_params['slow']
-        )
-        
-        # Временные файлы
-        raw_file = os.path.join(AUDIO_STORAGE, f"raw_{uuid.uuid4()}.mp3")
-        processed_file = os.path.join(AUDIO_STORAGE, f"processed_{uuid.uuid4()}.mp3")
-        
-        # Сохраняем исходный файл
-        tts.save(raw_file)
+            # Генерация исходного аудио
+            tts = gTTS(
+                text=text,
+                lang=tts_params.get('lang', 'ru'),
+                slow=tts_params.get('slow', False)
+            )
+            
+            # Сохраняем исходный файл
+            raw_file = os.path.join(AUDIO_STORAGE, f"raw_{uuid.uuid4()}.mp3")
+            tts.save(raw_file)
 
-        # Комплексная обработка FFmpeg для естественного звучания
-        ffmpeg_cmd = [
-            "ffmpeg",
-            "-i", raw_file,
-            "-af",
-            f"atempo={final_params['speed']},"  # Скорость
-            f"asetrate=44100*{final_params['pitch']},"  # Высота тона
-            "aresample=44100,"  # Ресемплинг
-            f"equalizer=f=1000:t=h:width=200:g={final_params['treble_cut']},"  # Снижаем высокие частоты
-            f"bass=g={final_params['bass_boost']}:f=110:width=100,"  # Усиливаем басы
-            f"volume={final_params['volume']},"  # Громкость
-            "highpass=f=70,"  # Фильтр низких шумов
-            "lowpass=f=5000",  # Фильтр высоких шумов
-            "-ac", "1",  # Моно
-            "-ar", "44100",  # Частота дискретизации
-            "-y",
-            processed_file
-        ]
+            # Обработка через ffmpeg
+            processed_file = os.path.join(AUDIO_STORAGE, f"processed_{uuid.uuid4()}.mp3")
+            
+            ffmpeg_cmd = [
+                "ffmpeg",
+                "-i", raw_file,
+                "-filter:a",
+                f"atempo={params['speed']},"  # Скорость
+                f"asetrate=44100*{params['pitch']},"  # Высота тона
+                f"volume={params['volume']}",  # Громкость
+                "-y",
+                processed_file
+            ]
+            
+            subprocess.run(ffmpeg_cmd, check=True)
+            cleanup_files(raw_file)
+            
+            audio_url = f"{request.host_url}audio/{os.path.basename(processed_file)}"
+            
+            result_data = {
+                "status": "success",
+                "audio_url": audio_url,
+                "id": task_id,
+                "user_id": user_id,
+                "time_start": start_time,
+                "time_end": time.time(),
+                "params": params
+            }
 
-        subprocess.run(
-            ffmpeg_cmd, 
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
-
-        # Удаляем исходный файл
-        cleanup_files(raw_file)
-
-        audio_url = f"{request.host_url}audio/{os.path.basename(processed_file)}"
-        
-        result_data = {
-            "status": "success",
-            "audio_url": audio_url,
-            "id": task_id,
-            "user_id": user_id,
-            "time_start": start_time,
-            "time_end": time.time(),
-            "params": final_params
-        }
-        
         update_task_status(task_id, "completed", result_data)
         return result_data, 200
 
@@ -468,7 +456,7 @@ def text_to_audio():
         data = request.get_json()
         text = data.get("text")
         user_id = data.get("user_id")
-        tts_params = data.get("tts_params", {})
+        tts_params = data.get("tts_params")
         
         if not text or not user_id:
             return jsonify({"status": "error", "error": "Необходимы text и user_id"}), 400
@@ -491,7 +479,7 @@ def async_text_to_audio():
         text = data.get("text")
         user_id = data.get("user_id")
         webhook_url = data.get("webhook_url")
-        tts_params = data.get("tts_params", {})
+        tts_params = data.get("tts_params")
         
         if not text or not user_id:
             return jsonify({"status": "error", "error": "Необходимы text и user_id"}), 400
