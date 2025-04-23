@@ -32,10 +32,10 @@ MAX_AUDIO_DURATION = 300
 AUDIO_STORAGE = "temp_audio"
 os.makedirs(AUDIO_STORAGE, exist_ok=True)
 FILE_LIFETIME = 300  # 5 минут в секундах
-MAX_TEXT_LENGTH = 1000  # Максимальная длина текста
+MAX_TEXT_LENGTH = 5000  # Увеличенный лимит до 5000 символов
 
 # Символы для удаления
-CHARS_TO_REMOVE = ["#", "/", "\\", "*"]
+CHARS_TO_REMOVE = ["#", "/", "\\"]
 
 TASKS = {}
 tasks_lock = Lock()
