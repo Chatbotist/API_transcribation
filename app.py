@@ -34,22 +34,28 @@ os.makedirs(AUDIO_STORAGE, exist_ok=True)
 FILE_LIFETIME = 300  # 5 минут в секундах
 MAX_TEXT_LENGTH = 1000  # Максимальная длина текста
 
-# Разрешенные символы
-ALLOWED_CHARS = r"[^a-zA-Zа-яА-ЯёЁ0-9\s.,!?;:-—()\"']"
+# Символы для удаления
+CHARS_TO_REMOVE = ["#", "/", "\\"]
 
 TASKS = {}
 tasks_lock = Lock()
 model = None
 
 def clean_text(text):
-    """Очистка текста от нежелательных символов"""
+    """Очистка текста от указанных символов"""
     if not text:
         return ""
     
+    # Удаляем только указанные символы
+    for char in CHARS_TO_REMOVE:
+        text = text.replace(char, '')
+    
+    # Обрезаем текст до максимальной длины
     text = text[:MAX_TEXT_LENGTH]
-    cleaned = re.sub(ALLOWED_CHARS, '', text)
-    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
-    return cleaned
+    
+    # Заменяем множественные пробелы на один
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
 
 def download_model():
     """Установка модели Vosk"""
@@ -106,6 +112,59 @@ def update_task_status(task_id, status, result=None):
             "result": result,
             "last_update": datetime.utcnow().isoformat()
         }
+
+def get_ffmpeg_params(format_type):
+    """Возвращает параметры FFmpeg для разных форматов"""
+    formats = {
+        'ogg': {
+            'codec': 'libopus',
+            'options': ['-ar', '48000', '-ac', '1', '-vbr', 'on', '-compression_level', '10', '-application', 'voip'],
+            'mimetype': 'audio/ogg; codecs=opus'
+        },
+        'mp3': {
+            'codec': 'libmp3lame',
+            'options': ['-ar', '44100', '-ac', '2', '-q:a', '2'],
+            'mimetype': 'audio/mpeg'
+        },
+        'wav': {
+            'codec': 'pcm_s16le',
+            'options': ['-ar', '44100', '-ac', '2'],
+            'mimetype': 'audio/wav'
+        },
+        'm4a': {
+            'codec': 'aac',
+            'options': ['-ar', '44100', '-ac', '2', '-b:a', '192k'],
+            'mimetype': 'audio/mp4'
+        }
+    }
+    return formats.get(format_type.lower(), formats['ogg'])
+
+def apply_audio_effects(input_file, output_file, params, format_type):
+    """Применение аудио эффектов через FFmpeg"""
+    try:
+        ffmpeg_params = get_ffmpeg_params(format_type)
+        
+        ffmpeg_cmd = [
+            "ffmpeg",
+            "-i", input_file,
+            "-map_metadata", "-1",
+            "-c:a", ffmpeg_params['codec'],
+            *ffmpeg_params['options'],
+            "-filter:a", 
+            f"atempo={params['speed']},asetrate=44100*{params['pitch']},volume={params['volume']}",
+            "-y",
+            output_file
+        ]
+        
+        subprocess.run(ffmpeg_cmd, check=True, stderr=subprocess.PIPE, stdout=subprocess.PIPE)
+        return True
+    except subprocess.CalledProcessError as e:
+        error_msg = e.stderr.decode('utf-8') if e.stderr else str(e)
+        logger.error(f"FFmpeg error: {error_msg}")
+        return False
+    except Exception as e:
+        logger.error(f"Audio effects error: {str(e)}")
+        return False
 
 def transcribe_audio(audio_url, task_id, user_id=None):
     """Транскрибация аудио в текст"""
@@ -187,38 +246,8 @@ def transcribe_audio(audio_url, task_id, user_id=None):
     finally:
         cleanup_files(wav_file, temp_input.name if temp_input else None)
 
-def apply_audio_effects(input_file, output_file, params):
-    """Применение аудио эффектов через FFmpeg"""
-    try:
-        ffmpeg_cmd = [
-            "ffmpeg",
-            "-i", input_file,
-            "-map_metadata", "-1",
-            "-c:a", "libopus",
-            "-b:a", "64k",
-            "-ar", "48000",
-            "-ac", "1",
-            "-vbr", "on",
-            "-compression_level", "10",
-            "-application", "voip",
-            "-filter:a", 
-            f"atempo={params['speed']},asetrate=44100*{params['pitch']},volume={params['volume']}",
-            "-y",
-            output_file
-        ]
-        
-        subprocess.run(ffmpeg_cmd, check=True, stderr=subprocess.PIPE, stdout=subprocess.PIPE)
-        return True
-    except subprocess.CalledProcessError as e:
-        error_msg = e.stderr.decode('utf-8') if e.stderr else str(e)
-        logger.error(f"FFmpeg error: {error_msg}")
-        return False
-    except Exception as e:
-        logger.error(f"Audio effects error: {str(e)}")
-        return False
-
 def generate_audio(text, task_id, user_id=None, tts_params=None):
-    """Генерация аудио из текста для Telegram Voice"""
+    """Генерация аудио из текста"""
     start_time = time.time()
     temp_file = None
     
@@ -230,14 +259,14 @@ def generate_audio(text, task_id, user_id=None, tts_params=None):
 
         text = clean_text(text)
         
-        # Параметры по умолчанию
+        # Параметры по умолчанию (оптимизированы для Telegram Voice)
         params = {
             'lang': 'ru',
             'slow': False,
             'speed': 1.0,
             'pitch': 1.0,
             'volume': 1.0,
-            'format': 'ogg'
+            'format': 'ogg'  # OGG по умолчанию для Telegram
         }
 
         # Обновляем параметры из запроса
@@ -250,7 +279,7 @@ def generate_audio(text, task_id, user_id=None, tts_params=None):
         params['speed'] = max(0.5, min(2.0, float(params['speed'])))
         params['pitch'] = max(0.5, min(1.5, float(params['pitch'])))
         params['volume'] = max(0.1, min(1.0, float(params['volume'])))
-        params['format'] = params['format'].lower() if params['format'].lower() in ['ogg', 'mp3'] else 'ogg'
+        params['format'] = params['format'].lower() if params['format'].lower() in ['ogg', 'mp3', 'wav', 'm4a'] else 'ogg'
 
         # Генерация имени файла
         filename = f"voice_{uuid.uuid4().hex}.{params['format']}"
@@ -268,7 +297,7 @@ def generate_audio(text, task_id, user_id=None, tts_params=None):
         tts.save(temp_file)
 
         # Применяем аудио эффекты
-        if not apply_audio_effects(temp_file, filepath, params):
+        if not apply_audio_effects(temp_file, filepath, params, params['format']):
             raise Exception("Ошибка применения аудио эффектов")
 
         # Запланировать удаление файла
@@ -462,12 +491,10 @@ def async_text_to_audio():
 def get_audio(filename):
     """Получение аудиофайла"""
     try:
-        if filename.endswith('.ogg'):
-            mimetype = 'audio/ogg; codecs=opus'
-        elif filename.endswith('.mp3'):
-            mimetype = 'audio/mpeg'
-        else:
-            mimetype = 'application/octet-stream'
+        # Определяем Content-Type по расширению файла
+        ext = filename.split('.')[-1].lower()
+        ffmpeg_params = get_ffmpeg_params(ext)
+        mimetype = ffmpeg_params['mimetype']
         
         response = send_from_directory(AUDIO_STORAGE, filename, mimetype=mimetype)
         response.headers['Content-Disposition'] = f'inline; filename="{filename}"'
