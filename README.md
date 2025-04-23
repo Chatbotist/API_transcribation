@@ -46,7 +46,7 @@ json
 
 Пример успешного ответа (200 OK):
 
-json
+```json
 {
   "status": "success",
   "audio_url": "https://api.example.com/audio/voice_1a2b3c4d.ogg",
@@ -62,21 +62,23 @@ json
     "format": "ogg"
   }
 }
+```
 Пример ошибки (400 Bad Request):
 
-json
+```json
 {
   "status": "error",
   "error": "Текст не может быть пустым",
   "id": "task-id-123",
   "time_operation": 0.01
 }
+```
 Асинхронный запрос
 Endpoint: POST /textToAudioAsync
 
 Параметры запроса (JSON):
 
-json
+```json
 {
   "text": "Текст для преобразования",
   "user_id": "user-123",
@@ -86,9 +88,10 @@ json
     "speed": 1.8
   }
 }
+```
 Ответ (202 Accepted):
 
-json
+```json
 {
   "status": "started",
   "id": "task-id-123",
@@ -96,9 +99,10 @@ json
   "webhook_url": "https://your-webhook.url/endpoint",
   "user_id": "user-123"
 }
+```
 Webhook будет отправлен на указанный URL при завершении задачи:
 
-json
+```json
 {
   "status": "success",
   "audio_url": "https://api.example.com/audio/voice_1a2b3c4d.mp3",
@@ -115,20 +119,22 @@ json
   },
   "webhook_url": "https://your-webhook.url/endpoint"
 }
+```
 2. Транскрибация аудио
 Синхронный запрос
 Endpoint: POST /transcribe
 
 Параметры запроса (JSON):
 
-json
+```json
 {
   "audio_url": "https://example.com/audio/file.ogg",
   "user_id": "user-123"
 }
+```
 Пример успешного ответа (200 OK):
 
-json
+```json
 {
   "status": "success",
   "text": "распознанный текст из аудио",
@@ -138,20 +144,22 @@ json
   "is_full": true,
   "audio_duration": 12.5
 }
+```
 Асинхронный запрос
 Endpoint: POST /transcribeAsync
 
 Параметры запроса (JSON):
 
-json
+```json
 {
   "audio_url": "https://example.com/audio/file.mp3",
   "user_id": "user-123",
   "webhook_url": "https://your-webhook.url/transcribe"
 }
+```
 Ответ (202 Accepted):
 
-json
+```json
 {
   "status": "started",
   "id": "task-id-456",
@@ -159,9 +167,10 @@ json
   "webhook_url": "https://your-webhook.url/transcribe",
   "user_id": "user-123"
 }
+```
 Webhook будет содержать результат транскрибации:
 
-json
+```json
 {
   "status": "success",
   "text": "распознанный текст",
@@ -172,6 +181,7 @@ json
   "audio_duration": 15.3,
   "webhook_url": "https://your-webhook.url/transcribe"
 }
+```
 3. Получение аудиофайла
 Endpoint: GET /audio/{filename}
 
@@ -189,7 +199,7 @@ GET https://api.example.com/taskStatus?id=task-id-123
 
 Ответ (200 OK):
 
-json
+```json
 {
   "status": "success",
   "task_id": "task-id-123",
@@ -203,6 +213,7 @@ json
   },
   "last_update": "2023-06-15T12:34:56.789Z"
 }
+```
 5. Получение аудиофайла
 Endpoint: GET /audio/{filename}
 
@@ -214,7 +225,7 @@ GET /audio/voice_1a2b3c4d.ogg
 
 Примеры использования
 Пример 1: Быстрая генерация голосового сообщения для Telegram
-bash
+```bash
 curl -X POST "https://api.example.com/textToAudio" \
 -H "Content-Type: application/json" \
 -d '{
@@ -225,16 +236,18 @@ curl -X POST "https://api.example.com/textToAudio" \
     "speed": 1.2
   }
 }'
+```
 Пример 2: Транскрибация голосового сообщения
-bash
+```bash
 curl -X POST "https://api.example.com/transcribe" \
 -H "Content-Type: application/json" \
 -d '{
   "audio_url": "https://example.com/voice_message.ogg",
   "user_id": "user-456"
 }'
+```
 Пример 3: Асинхронная генерация MP3 с webhook
-bash
+```bash
 curl -X POST "https://api.example.com/textToAudioAsync" \
 -H "Content-Type: application/json" \
 -d '{
@@ -246,6 +259,7 @@ curl -X POST "https://api.example.com/textToAudioAsync" \
     "volume": 0.9
   }
 }'
+```
 Обработка ошибок
 Все ошибки возвращаются с соответствующим HTTP-статусом и JSON-объектом:
 
