@@ -7,7 +7,6 @@ services:
       wget https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip -O model.zip
       unzip model.zip
       
-      # Автодетект структуры
       if [ -f "vosk-model-small-ru-0.22/am/final.mdl" ]; then
           echo "Новая структура архива"
       elif [ -f "vosk-model-small-ru-0.22/vosk-model-small-ru-0.22/am/final.mdl" ]; then
