@@ -35,7 +35,7 @@ FILE_LIFETIME = 300  # 5 минут в секундах
 MAX_TEXT_LENGTH = 5000  # Увеличенный лимит до 5000 символов
 
 # Символы для удаления
-CHARS_TO_REMOVE = ["#", "/", "\\"]
+CHARS_TO_REMOVE = ["#", "/", "\\", "*"]
 
 TASKS = {}
 tasks_lock = Lock()
