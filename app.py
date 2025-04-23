@@ -10,7 +10,7 @@ import tempfile
 from threading import Thread, Lock
 import time
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime
 import re
 
 app = Flask(__name__)
@@ -29,21 +29,13 @@ MODEL_URL = f"https://alphacephei.com/vosk/models/{MODEL_NAME}.zip"
 CHUNK_SIZE = 4000
 SAMPLE_RATE = 16000
 MAX_AUDIO_DURATION = 300
-MAX_SYNC_PROCESSING_TIME = 55
 AUDIO_STORAGE = "temp_audio"
 os.makedirs(AUDIO_STORAGE, exist_ok=True)
 FILE_LIFETIME = 300  # 5 минут в секундах
 MAX_TEXT_LENGTH = 1000  # Максимальная длина текста
 
-# Разрешенные символы (оставляем только нужные для естественной речи)
+# Разрешенные символы
 ALLOWED_CHARS = r"[^a-zA-Zа-яА-ЯёЁ0-9\s.,!?;:-—()\"']"
-
-# Глобальные переменные состояния
-SERVER_STATUS = {
-    "status": "available",
-    "last_check": datetime.utcnow().isoformat(),
-    "active_tasks": 0
-}
 
 TASKS = {}
 tasks_lock = Lock()
@@ -54,13 +46,8 @@ def clean_text(text):
     if not text:
         return ""
     
-    # Обрезаем текст до максимальной длины
     text = text[:MAX_TEXT_LENGTH]
-    
-    # Удаляем все символы, кроме разрешенных
     cleaned = re.sub(ALLOWED_CHARS, '', text)
-    
-    # Заменяем множественные пробелы на один
     cleaned = re.sub(r'\s+', ' ', cleaned).strip()
     return cleaned
 
@@ -95,14 +82,12 @@ def download_model():
 # Инициализация модели
 if not download_model():
     logger.error("Не удалось загрузить модель Vosk!")
-    SERVER_STATUS["status"] = "unavailable"
 else:
     try:
         model = Model(MODEL_NAME)
         logger.info("Модель Vosk успешно инициализирована")
     except Exception as e:
         logger.error(f"Ошибка инициализации модели: {str(e)}")
-        SERVER_STATUS["status"] = "unavailable"
 
 def cleanup_files(*files):
     """Удаление временных файлов"""
@@ -122,116 +107,27 @@ def update_task_status(task_id, status, result=None):
             "last_update": datetime.utcnow().isoformat()
         }
 
-def transcribe_audio(audio_url, task_id, user_id=None):
-    """Транскрибация аудио в текст"""
-    start_time = time.time()
-    wav_file = None
-    temp_input = None
-    
-    try:
-        SERVER_STATUS["active_tasks"] += 1
-        update_task_status(task_id, "processing")
-        
-        # Скачивание и конвертация
-        temp_input = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
-        response = requests.get(audio_url, stream=True)
-        response.raise_for_status()
-        
-        with open(temp_input.name, "wb") as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
-
-        wav_file = tempfile.NamedTemporaryFile(delete=False, suffix=".wav").name
-        subprocess.run([
-            "ffmpeg", "-i", temp_input.name,
-            "-ar", str(SAMPLE_RATE), "-ac", "1", "-y", wav_file
-        ], check=True)
-
-        # Проверка длительности
-        duration = float(subprocess.run([
-            "ffprobe", "-i", wav_file,
-            "-show_entries", "format=duration",
-            "-v", "quiet", "-of", "csv=p=0"
-        ], capture_output=True, text=True).stdout)
-        
-        if duration > MAX_AUDIO_DURATION:
-            raise ValueError(f"Аудио слишком длинное (максимум {MAX_AUDIO_DURATION//60} минут)")
-
-        # Транскрибация
-        recognizer = KaldiRecognizer(model, SAMPLE_RATE)
-        recognizer.SetWords(True)
-
-        result_text = []
-        with open(wav_file, "rb") as f:
-            while True:
-                data = f.read(CHUNK_SIZE)
-                if len(data) == 0:
-                    break
-                
-                if time.time() - start_time > MAX_SYNC_PROCESSING_TIME:
-                    raise TimeoutError("Превышено время обработки")
-                
-                if recognizer.AcceptWaveform(data):
-                    result = json.loads(recognizer.Result())
-                    if result.get("text"):
-                        result_text.append(result["text"])
-
-        final_result = json.loads(recognizer.FinalResult())
-        if final_result.get("text"):
-            result_text.append(final_result["text"])
-
-        full_text = " ".join(result_text)
-        result_data = {
-            "status": "success",
-            "text": full_text,
-            "user_id": user_id,
-            "id": task_id,
-            "time_start": start_time,
-            "time_end": time.time(),
-            "is_full": len(full_text) > 0,
-            "audio_duration": duration
-        }
-
-        update_task_status(task_id, "completed", result_data)
-        return result_data, 200 if len(full_text) > 0 else 201
-
-    except Exception as e:
-        error_data = {
-            "status": "error",
-            "error": str(e),
-            "id": task_id,
-            "time_start": start_time,
-            "time_end": time.time()
-        }
-        update_task_status(task_id, "failed", error_data)
-        return error_data, 400
-    finally:
-        cleanup_files(wav_file, temp_input.name if temp_input else None)
-        SERVER_STATUS["active_tasks"] = max(0, SERVER_STATUS["active_tasks"] - 1)
-        SERVER_STATUS["last_check"] = datetime.utcnow().isoformat()
-
 def generate_audio(text, task_id, user_id=None, tts_params=None):
-    """Генерация аудио из текста с поддержкой Telegram Voice"""
+    """Генерация аудио из текста для Telegram Voice"""
     start_time = time.time()
     temp_file = None
+    
     try:
-        SERVER_STATUS["active_tasks"] += 1
         update_task_status(task_id, "processing")
 
         if not text:
             raise ValueError("Текст не может быть пустым")
 
-        # Очистка и обрезка текста
         text = clean_text(text)
         
-        # Параметры по умолчанию (оптимизированы для Telegram Voice)
+        # Параметры по умолчанию
         params = {
             'lang': 'ru',
             'slow': False,
             'speed': 1.0,
             'pitch': 1.0,
             'volume': 1.0,
-            'format': 'ogg'  # OGG по умолчанию для Telegram
+            'format': 'ogg'
         }
 
         # Обновляем параметры из запроса
@@ -242,46 +138,42 @@ def generate_audio(text, task_id, user_id=None, tts_params=None):
         params['speed'] = max(0.5, min(2.0, float(params['speed'])))
         params['pitch'] = max(0.5, min(1.5, float(params['pitch'])))
         params['volume'] = max(0.1, min(1.0, float(params['volume'])))
-        params['format'] = params['format'].lower() if params['format'].lower() in ['ogg', 'mp3', 'opus'] else 'ogg'
+        params['format'] = params['format'].lower() if params['format'].lower() in ['ogg', 'mp3'] else 'ogg'
 
         # Генерация имени файла
-        timestamp = datetime.now().strftime("%d-%m-%Y_%H-%M-%S")
-        filename = f"VoiceMessage_{timestamp}.{params['format']}"
+        filename = f"voice_{uuid.uuid4().hex}.{params['format']}"
         filepath = os.path.join(AUDIO_STORAGE, filename)
 
         # Генерация аудио через gTTS
-        tts = gTTS(
-            text=text,
-            lang=params['lang'],
-            slow=params['slow']
-        )
+        tts = gTTS(text=text, lang=params['lang'], slow=params['slow'])
         
         # Сохраняем временный файл
         temp_file = os.path.join(AUDIO_STORAGE, f"temp_{uuid.uuid4()}.mp3")
         tts.save(temp_file)
 
-        # Оптимизированные параметры для Telegram Voice (OGG/Opus)
+        # Конвертация в OGG/Opus с оптимальными параметрами
         ffmpeg_cmd = [
             "ffmpeg",
             "-i", temp_file,
-            "-c:a", "libopus",  # Используем кодек Opus
-            "-b:a", "64k",      # Битрейт 64k
-            "-ar", "48000",     # Частота дискретизации 48kHz
-            "-ac", "1",        # Моно
-            "-vbr", "on",       # Включить переменный битрейт
-            "-compression_level", "10",  # Максимальное сжатие
-            "-application", "voip",       # Оптимизация для голоса
+            "-c:a", "libopus",
+            "-b:a", "64k",
+            "-ar", "48000",
+            "-ac", "1",
+            "-vbr", "on",
+            "-compression_level", "10",
+            "-application", "voip",
             "-y",
             filepath
         ]
 
-        # Удаляем все метаданные
+        # Удаление метаданных
         ffmpeg_cmd.insert(1, "-map_metadata")
         ffmpeg_cmd.insert(2, "-1")
 
-        subprocess.run(ffmpeg_cmd, check=True)
+        # Запуск конвертации
+        subprocess.run(ffmpeg_cmd, check=True, stderr=subprocess.PIPE)
 
-        # Запланировать удаление файла через 5 минут
+        # Запланировать удаление файла
         Thread(target=lambda: (
             time.sleep(FILE_LIFETIME),
             os.path.exists(filepath) and os.remove(filepath)
@@ -294,33 +186,42 @@ def generate_audio(text, task_id, user_id=None, tts_params=None):
             "audio_url": audio_url,
             "id": task_id,
             "user_id": user_id,
-            "time_start": start_time,
-            "time_end": time.time(),
+            "time_operation": round(time.time() - start_time, 2),
             "params": params
         }
 
         update_task_status(task_id, "completed", result_data)
         return result_data, 200
 
+    except subprocess.CalledProcessError as e:
+        error_msg = e.stderr.decode('utf-8') if e.stderr else str(e)
+        logger.error(f"FFmpeg error: {error_msg}")
+        error_data = {
+            "status": "error",
+            "error": f"Ошибка обработки аудио: {error_msg}",
+            "id": task_id,
+            "time_operation": round(time.time() - start_time, 2)
+        }
+        update_task_status(task_id, "failed", error_data)
+        return error_data, 400
+        
     except Exception as e:
         error_data = {
             "status": "error",
             "error": str(e),
             "id": task_id,
-            "time_start": start_time,
-            "time_end": time.time()
+            "time_operation": round(time.time() - start_time, 2)
         }
         update_task_status(task_id, "failed", error_data)
         return error_data, 400
+        
     finally:
         cleanup_files(temp_file)
-        SERVER_STATUS["active_tasks"] = max(0, SERVER_STATUS["active_tasks"] - 1)
-        SERVER_STATUS["last_check"] = datetime.utcnow().isoformat()
 
 def cleanup_old_audio():
     """Фоновая задача для очистки старых файлов"""
     while True:
-        time.sleep(60)  # Проверка каждую минуту
+        time.sleep(60)
         try:
             now = time.time()
             for f in os.listdir(AUDIO_STORAGE):
@@ -328,24 +229,10 @@ def cleanup_old_audio():
                 if os.path.isfile(filepath) and (now - os.path.getmtime(filepath)) > FILE_LIFETIME:
                     os.remove(filepath)
         except Exception as e:
-            logger.error(f"Ошибка очистки старых файлов: {str(e)}")
+            logger.error(f"Ошибка очистки файлов: {str(e)}")
 
 # Запускаем фоновую задачу очистки
 Thread(target=cleanup_old_audio, daemon=True).start()
-
-@app.route("/health", methods=["GET"])
-def health_check():
-    """Проверка состояния сервера"""
-    try:
-        status = "available" if SERVER_STATUS["status"] == "available" and model else "unavailable"
-        return jsonify({
-            "status": status,
-            "model_loaded": bool(model),
-            "last_check": SERVER_STATUS["last_check"],
-            "active_tasks": SERVER_STATUS["active_tasks"]
-        }), 200 if status == "available" else 503
-    except Exception as e:
-        return jsonify({"status": "error", "error": str(e)}), 500
 
 @app.route("/taskStatus", methods=["GET"])
 def task_status():
@@ -371,70 +258,28 @@ def task_status():
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)}), 500
 
-@app.route("/transcribe", methods=["POST"])
-def sync_transcribe():
-    """Синхронная транскрибация"""
-    try:
-        if SERVER_STATUS["status"] != "available" or not model:
-            return jsonify({"status": "error", "error": "Сервер недоступен"}), 503
-
-        data = request.get_json()
-        audio_url = data.get("audio_url")
-        user_id = data.get("user_id")
-        
-        if not audio_url or not user_id:
-            return jsonify({"status": "error", "error": "Необходимы audio_url и user_id"}), 400
-
-        task_id = str(uuid.uuid4())
-        result, status_code = transcribe_audio(audio_url, task_id, user_id)
-        return jsonify(result), status_code
-    except Exception as e:
-        return jsonify({"status": "error", "error": str(e)}), 500
-
-@app.route("/transcribeAsync", methods=["POST"])
-def async_transcribe():
-    """Асинхронная транскрибация"""
-    try:
-        if SERVER_STATUS["status"] != "available" or not model:
-            return jsonify({"status": "error", "error": "Сервер недоступен"}), 503
-
-        data = request.get_json()
-        audio_url = data.get("audio_url")
-        user_id = data.get("user_id")
-        webhook_url = data.get("webhook_url")
-        
-        if not audio_url or not user_id:
-            return jsonify({"status": "error", "error": "Необходимы audio_url и user_id"}), 400
-
-        task_id = str(uuid.uuid4())
-        start_time = time.time()
-        
-        def async_task():
-            result, _ = transcribe_audio(audio_url, task_id, user_id)
-            if webhook_url:
-                result["webhook_url"] = webhook_url
-                requests.post(webhook_url, json=result, timeout=10)
-        
-        Thread(target=async_task).start()
-        
-        return jsonify({
-            "status": "started",
-            "id": task_id,
-            "time_start": int(start_time),
-            "webhook_url": webhook_url,
-            "user_id": user_id
-        }), 202
-    except Exception as e:
-        return jsonify({"status": "error", "error": str(e)}), 500
-
 @app.route("/textToAudio", methods=["POST"])
 def text_to_audio():
-    """Синхронная генерация аудио (оптимизировано для Telegram Voice)"""
+    """Синхронная генерация аудио"""
     try:
+        if not model:
+            return jsonify({"status": "error", "error": "Модель не загружена"}), 503
+
+        # Получаем данные в правильном формате
         data = request.get_json()
-        text = data.get("text")
-        user_id = data.get("user_id")
-        tts_params = data.get("tts_params", {})
+        if isinstance(data, list):
+            # Поддержка старого формата [text, user_id, params]
+            if len(data) >= 3:
+                text = data[0]
+                user_id = data[1]
+                tts_params = data[2] if len(data) > 2 else {}
+            else:
+                return jsonify({"status": "error", "error": "Неверный формат данных"}), 400
+        else:
+            # Новый формат {text, user_id, tts_params}
+            text = data.get("text")
+            user_id = data.get("user_id")
+            tts_params = data.get("tts_params", {})
         
         if not text or not user_id:
             return jsonify({"status": "error", "error": "Необходимы text и user_id"}), 400
@@ -442,52 +287,16 @@ def text_to_audio():
         task_id = str(uuid.uuid4())
         result, status_code = generate_audio(text, task_id, user_id, tts_params)
         return jsonify(result), status_code
-    except Exception as e:
-        return jsonify({"status": "error", "error": str(e)}), 500
-
-@app.route("/textToAudioAsync", methods=["POST"])
-def async_text_to_audio():
-    """Асинхронная генерация аудио"""
-    try:
-        data = request.get_json()
-        text = data.get("text")
-        user_id = data.get("user_id")
-        webhook_url = data.get("webhook_url")
-        tts_params = data.get("tts_params", {})
         
-        if not text or not user_id:
-            return jsonify({"status": "error", "error": "Необходимы text и user_id"}), 400
-
-        task_id = str(uuid.uuid4())
-        start_time = time.time()
-        
-        def async_task():
-            result, _ = generate_audio(text, task_id, user_id, tts_params)
-            if webhook_url:
-                result["webhook_url"] = webhook_url
-                requests.post(webhook_url, json=result, timeout=10)
-        
-        Thread(target=async_task).start()
-        
-        return jsonify({
-            "status": "started",
-            "id": task_id,
-            "time_start": int(start_time),
-            "webhook_url": webhook_url,
-            "user_id": user_id
-        }), 202
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)}), 500
 
 @app.route("/audio/<filename>", methods=["GET"])
 def get_audio(filename):
-    """Получение аудиофайла с правильными заголовками"""
+    """Получение аудиофайла"""
     try:
-        # Определяем Content-Type по расширению файла
         if filename.endswith('.ogg'):
             mimetype = 'audio/ogg; codecs=opus'
-        elif filename.endswith('.opus'):
-            mimetype = 'audio/opus'
         elif filename.endswith('.mp3'):
             mimetype = 'audio/mpeg'
         else:
