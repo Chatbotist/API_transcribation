@@ -263,7 +263,7 @@ def generate_audio(text, task_id, user_id=None, tts_params=None):
         params = {
             'lang': 'ru',
             'slow': False,
-            'speed': 1.0,
+            'speed': 1.2,
             'pitch': 0.55,
             'volume': 1.0,
             'format': 'ogg'  # OGG по умолчанию для Telegram
